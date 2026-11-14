@@ -1,0 +1,42 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'dev.mobile3d.engine'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'dev.mobile3d.engine'
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName '1.0'
+        ndk { abiFilters 'arm64-v8a', 'armeabi-v7a' }
+        externalNativeBuild {
+            cmake {
+                arguments '-DANDROID_STL=c++_shared'
+                cppFlags '-std=c++17 -O2'
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path 'src/main/cpp/CMakeLists.txt'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            // APK подписывается отладочным ключом, чтобы его можно было сразу установить на телефон
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}

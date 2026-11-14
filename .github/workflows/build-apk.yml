@@ -1,0 +1,37 @@
+name: Build APK
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install NDK and CMake
+        run: sdkmanager "ndk;26.3.11579264" "cmake;3.22.1" "platforms;android-34" "build-tools;34.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Build release APK
+        working-directory: android
+        env:
+          ANDROID_NDK_ROOT: ${{ env.ANDROID_HOME }}/ndk/26.3.11579264
+        run: gradle assembleRelease --no-daemon -Pandroid.ndkVersion=26.3.11579264
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Mobile3D-apk
+          path: android/app/build/outputs/apk/release/*.apk

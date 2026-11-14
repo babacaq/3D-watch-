@@ -1,0 +1,47 @@
+// Проигрыватель скелетной анимации: сэмплирование клипов, кроссфейд, матрицы костей.
+#pragma once
+#include <vector>
+
+#include "model.h"
+
+namespace eng {
+
+struct Pose {
+    std::vector<Vec3> t, s;
+    std::vector<Quat> r;
+};
+
+class Animator {
+public:
+    void setModel(const Model* m);
+    // Переключиться на клип с плавным переходом (blend секунд).
+    void play(int clip, float blend = 0.25f);
+    void update(float dt);
+
+    int current() const { return cur_.clip; }
+    float time() const { return cur_.time; }
+    float duration() const;
+    float speed = 1.f;
+    bool paused = false;
+
+    std::vector<Mat4> world;                  // мировые матрицы всех узлов
+    std::vector<std::vector<Mat4>> jointMat;  // по скинам: world[joint] * invBind
+    float travelSpeed() const;
+
+private:
+    struct State {
+        int clip = -1;
+        float time = 0;
+    };
+    const Model* model_ = nullptr;
+    State cur_, prev_;
+    float blendT_ = 1.f, blendDur_ = 0.25f;
+    Pose pose_, poseA_;
+
+    void restPose(Pose& p) const;
+    void sample(const Clip& c, float time, Pose& p) const;
+    void advance(State& s, float dt) const;
+    void computeMatrices();
+};
+
+}  // namespace eng
