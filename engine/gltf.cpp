@@ -229,21 +229,43 @@ std::unique_ptr<Model> build(const Json& root, std::vector<Blob>& bufs, const st
 
             MeshData md;
             Color base(1, 1, 1, 1);
-            float rough = 0.6f;
+            md.roughness = 0.5f; md.metallic = 0.f;
             if (pr.has("material")) {
                 const Json& mat = root["materials"][pr["material"].integer()];
                 const Json& pbr = mat["pbrMetallicRoughness"];
                 const Json& sg = mat["extensions"]["KHR_materials_pbrSpecularGlossiness"];
                 const Json& bc = pbr.has("baseColorFactor") ? pbr["baseColorFactor"] : sg["diffuseFactor"];
                 if (!bc.isNull()) base = Color((float)bc[0].number(1), (float)bc[1].number(1), (float)bc[2].number(1), (float)bc[3].number(1));
-                if (pbr.has("roughnessFactor")) rough = (float)pbr["roughnessFactor"].number(0.6);
+                md.roughness = (float)pbr["roughnessFactor"].number(1.0);
+                md.metallic = (float)pbr["metallicFactor"].number(1.0);
+                if (!pbr.has("roughnessFactor") && !pbr.has("metallicFactor") && !pbr.has("baseColorFactor") && !sg.isNull()) {
+                    md.metallic = 0.f;
+                    md.roughness = clampf(1.f - (float)sg["glossinessFactor"].number(0.5), 0.05f, 1.f);
+                }
                 md.doubleSided = mat["doubleSided"].type == Json::Bool && mat["doubleSided"].b;
                 const std::string& am = mat["alphaMode"].string();
                 md.alphaMode = am == "MASK" ? 1 : am == "BLEND" ? 2 : 0;
                 md.alphaCutoff = (float)mat["alphaCutoff"].number(0.5);
-                md.texture = hasUV ? texImage(pbr.has("baseColorTexture") ? pbr["baseColorTexture"] : sg["diffuseTexture"]) : -1;
+                md.name = mat["name"].string();
+                if (hasUV) {
+                    md.texture = texImage(pbr.has("baseColorTexture") ? pbr["baseColorTexture"] : sg["diffuseTexture"]);
+                    if (md.texture >= 0) model->textures[md.texture].srgb = true;
+                    md.texMR = texImage(pbr["metallicRoughnessTexture"]);
+                    md.texNormal = texImage(mat["normalTexture"]);
+                    md.texOcclusion = texImage(mat["occlusionTexture"]);
+                    md.texEmissive = texImage(mat["emissiveTexture"]);
+                    if (md.texEmissive >= 0) model->textures[md.texEmissive].srgb = true;
+                    md.normalScale = (float)mat["normalTexture"]["scale"].number(1.0);
+                }
+                const Json& em = mat["emissiveFactor"];
+                if (!em.isNull()) {
+                    float k = (float)mat["extensions"]["KHR_materials_emissive_strength"]["emissiveStrength"].number(1.0);
+                    for (int q = 0; q < 3; q++) md.emissive[q] = (float)em[q].number(0) * k;
+                }
             }
-            md.shininess = clampf(2.f / std::max(rough * rough, 0.02f), 4.f, 128.f);
+            md.roughness = clampf(md.roughness, 0.04f, 1.f);
+            md.metallic = clampf(md.metallic, 0.f, 1.f);
+            md.shininess = clampf(2.f / std::max(md.roughness * md.roughness, 0.02f), 4.f, 128.f);
             md.verts.resize(pn);
             for (int i = 0; i < pn; i++) {
                 Vertex& v = md.verts[i];

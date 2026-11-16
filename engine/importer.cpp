@@ -145,7 +145,9 @@ namespace {
 struct Mtl {
     float kd[3] = {0.8f, 0.8f, 0.8f};
     float alpha = 1.f, ns = 32.f;
-    std::string mapKd;
+    std::string mapKd, mapBump;
+    float ks = 0.f;
+    float ke[3] = {0, 0, 0};
 };
 
 struct Cursor {
@@ -188,7 +190,9 @@ void parseMtl(const std::vector<uint8_t>& data, std::map<std::string, Mtl>& out)
             else if (k == "d") cur->alpha = c.num(1);
             else if (k == "Tr") cur->alpha = 1.f - c.num(0);
             else if (k == "Ns") cur->ns = c.num(32);
-            else if (k == "map_Kd" || k == "map_d") {
+            else if (k == "Ks") { float a = c.num(), b = c.num(), d = c.num(); cur->ks = (a + b + d) / 3.f; }
+            else if (k == "Ke") { cur->ke[0] = c.num(); cur->ke[1] = c.num(); cur->ke[2] = c.num(); }
+            else if (k == "map_Kd" || k == "map_d" || k == "map_Bump" || k == "map_bump" || k == "bump" || k == "norm") {
                 std::string rest = c.restOfLine();
                 // отбросить опции вида "-s 1 1 1": берём последний путь с расширением изображения
                 std::string path = rest;
@@ -204,6 +208,7 @@ void parseMtl(const std::vector<uint8_t>& data, std::map<std::string, Mtl>& out)
                 }
                 if (i < rest.size()) path = rest.substr(i);
                 if (k == "map_Kd") cur->mapKd = path;
+                else if (k != "map_d") cur->mapBump = path;
             }
         }
         c.skipLine();
@@ -362,6 +367,9 @@ std::unique_ptr<Model> importObj(const std::string& name, const uint8_t* data, s
                 v.c[0] = (uint8_t)(v.c[0] * clampf(m.kd[0], 0, 1)); v.c[1] = (uint8_t)(v.c[1] * clampf(m.kd[1], 0, 1)); v.c[2] = (uint8_t)(v.c[2] * clampf(m.kd[2], 0, 1));
             }
             md.shininess = clampf(m.ns, 4.f, 128.f);
+            md.roughness = clampf(std::sqrt(2.f / (std::max(m.ns, 1.f) + 2.f)), 0.08f, 1.f);
+            md.metallic = 0.f;
+            for (int q = 0; q < 3; q++) md.emissive[q] = m.ke[q];
             alpha = m.alpha;
             if (!m.mapKd.empty() && reader) {
                 auto tc = texCache.find(m.mapKd);
@@ -375,6 +383,20 @@ std::unique_ptr<Model> importObj(const std::string& name, const uint8_t* data, s
                     tc = texCache.emplace(m.mapKd, ti).first;
                 }
                 md.texture = tc->second;
+                if (md.texture >= 0) model->textures[md.texture].srgb = true;
+            }
+            auto looksNormal = [](std::string s) { for (auto& ch : s) ch = (char)std::tolower((unsigned char)ch); return s.find("norm") != std::string::npos || s.find("nrm") != std::string::npos || s.find("_n.") != std::string::npos; };
+            if (!m.mapBump.empty() && reader && looksNormal(m.mapBump)) {  // bump-карты высоты не используем: только похожие на карты нормалей
+                auto tc = texCache.find("bump:" + m.mapBump);
+                if (tc == texCache.end()) {
+                    int ti = -1;
+                    std::vector<uint8_t> bytes;
+                    std::string pth = m.mapBump;
+                    for (auto& ch : pth) if (ch == '\\') ch = '/';
+                    if (reader(pth, bytes) || reader(baseName(pth), bytes)) ti = addTextureFromMemory(*model, bytes.data(), bytes.size(), nullptr);
+                    tc = texCache.emplace("bump:" + m.mapBump, ti).first;
+                }
+                md.texNormal = tc->second;
             }
         } else for (auto& v : md.verts) v.c[0] = v.c[1] = v.c[2] = v.c[0] == 255 ? 204 : v.c[0];
         if (alpha < 0.999f) { md.alphaMode = 2; for (auto& v : md.verts) v.c[3] = (uint8_t)(alpha * 255); }

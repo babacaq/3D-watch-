@@ -25,6 +25,7 @@ static_assert(sizeof(Vertex) == 56, "Vertex layout");
 struct Texture {
     int w = 0, h = 0;
     std::vector<uint8_t> rgba;
+    bool srgb = false;  // цветовая текстура (база/свечение) хранится в sRGB
     GLuint id = 0;
     void upload();
     void release();
@@ -39,6 +40,14 @@ struct MeshData {
     int texture = -1;        // индекс в Model::textures или -1 (только цвет вершин)
     int alphaMode = 0;       // 0 непрозрачный, 1 mask (alphaCutoff), 2 blend
     float alphaCutoff = 0.5f;
+    // PBR (metallic-roughness)
+    float metallic = 0.f, roughness = 0.6f, normalScale = 1.f;
+    float emissive[3] = {0, 0, 0};
+    int texMR = -1;        // G = roughness, B = metallic
+    int texNormal = -1;
+    int texEmissive = -1;
+    int texOcclusion = -1; // R
+    std::string name;
     GLuint vao = 0, vbo = 0, ibo = 0;
 
     void upload();

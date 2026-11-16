@@ -34,7 +34,16 @@ public:
     bool init();
     void release();
     void clear();
+    void seed(uint32_t s) { seed_ = s * 2654435761u + 12345u; rnd(); rnd(); }
+    // Эффекты сцены (вызываются каждый шаг симуляции). acc - накопители частиц эффекта (3 числа).
+    void emitFire(Vec3 pos, float scale, float dt, float* acc);
+    void emitSmoke(Vec3 pos, float scale, float dt, float* acc);
+    void emitSparks(Vec3 pos, Vec3 dir, float scale, float dt, float* acc);
+    void fireLight(Vec3 pos, float scale, float phase);  // постоянный свет костра на этот кадр
+    void beginStep() { steady_.clear(); }
     void update(float dt, float groundY);
+    void setOutputScale(float s) { outScale_ = s; }  // множитель яркости (запас для LDR-буфера)
+    void setLightScale(float s) { lightScale_ = s; }  // освещённость дыма и пыли
     void render(const Mat4& vp, Vec3 camRight, Vec3 camUp, Vec3 camPos);
 
     // готовые эффекты
@@ -64,11 +73,13 @@ private:
     std::vector<Particle> ps_;
     std::vector<Emitter> emitters_;
     std::vector<PointLight> lights_;
+    std::vector<PointLight> steady_;
     std::vector<float> inst_;
     uint32_t seed_ = 12345;
     float time_ = 0;
     GLuint prog_ = 0, vao_ = 0, quad_ = 0, ibuf_ = 0;
-    GLint uVP_ = 0, uRight_ = 0, uUp_ = 0, uCam_ = 0;
+    GLint uVP_ = 0, uRight_ = 0, uUp_ = 0, uCam_ = 0, uOut_ = -1, uLight_ = -1;
+    float outScale_ = 1.f, lightScale_ = 1.f;
     size_t ibufCap_ = 0;
 };
 

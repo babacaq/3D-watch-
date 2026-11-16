@@ -72,9 +72,11 @@ typedef ptrdiff_t GLintptr;
 #define GL_RGBA8 0x8058
 #define GL_RED 0x1903
 #define GL_R8 0x8229
+#define GL_SRGB8_ALPHA8 0x8C43
 #define GL_DEPTH_COMPONENT 0x1902
 #define GL_DEPTH_COMPONENT16 0x81A5
 #define GL_DEPTH_COMPONENT24 0x81A6
+#define GL_DEPTH_COMPONENT32F 0x8CAC
 #define GL_TEXTURE_COMPARE_MODE 0x884C
 #define GL_TEXTURE_COMPARE_FUNC 0x884D
 #define GL_COMPARE_REF_TO_TEXTURE 0x884E
@@ -85,6 +87,20 @@ typedef ptrdiff_t GLintptr;
 #define GL_FRAMEBUFFER_COMPLETE 0x8CD5
 #define GL_PACK_ALIGNMENT 0x0D05
 #define GL_UNPACK_ALIGNMENT 0x0CF5
+#define GL_EXTENSIONS 0x1F03
+#define GL_RGBA16F 0x881A
+#define GL_HALF_FLOAT 0x140B
+#define GL_SCISSOR_TEST 0x0C11
+#define GL_TEXTURE2 0x84C2
+#define GL_TEXTURE3 0x84C3
+#define GL_TEXTURE4 0x84C4
+#define GL_TEXTURE5 0x84C5
+#define GL_TEXTURE6 0x84C6
+#define GL_MAX_TEXTURE_SIZE 0x0D33
+#define GL_ONE_MINUS_DST_ALPHA 0x0305
+#define GL_DST_ALPHA 0x0304
+#define GL_ZERO 0
+#define GL_CLAMP_TO_BORDER 0x812D
 #define GL_VERSION 0x1F02
 #define GL_RENDERER 0x1F01
 #define GL_MAX_VERTEX_UNIFORM_VECTORS 0x8DFB
@@ -106,6 +122,11 @@ void glDrawElementsInstanced(GLenum mode, GLsizei count, GLenum type, const void
 void glDrawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLsizei instances);
 void glPolygonOffset(GLfloat factor, GLfloat units);
 void glPixelStorei(GLenum pname, GLint param);
+void glScissor(GLint x, GLint y, GLsizei w, GLsizei h);
+void glColorMask(GLboolean r, GLboolean g, GLboolean b, GLboolean a);
+void glUniform1fv(GLint loc, GLsizei count, const GLfloat* v);
+void glUniform2fv(GLint loc, GLsizei count, const GLfloat* v);
+void glUniformMatrix3fv(GLint loc, GLsizei count, GLboolean transpose, const GLfloat* v);
 void glReadPixels(GLint x, GLint y, GLsizei w, GLsizei h, GLenum format, GLenum type, void* data);
 
 GLuint glCreateShader(GLenum type);

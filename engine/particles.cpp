@@ -35,6 +35,7 @@ void main(){
 static const char* kFS = R"(#version 300 es
 precision mediump float;
 in vec2 v_uv; in vec4 v_m;
+uniform float u_outScale; uniform float u_light;
 out vec4 o;
 float h(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7))) * 43758.5453); }
 float vn(vec2 p){ vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);
@@ -44,7 +45,7 @@ vec3 flame(float k){   // k: 0 тёмный .. 1 белый
   vec3 a = vec3(0.35,0.03,0.0), b = vec3(1.0,0.35,0.04), c = vec3(1.0,0.8,0.25), d = vec3(1.0,0.97,0.8);
   return k < 0.4 ? mix(a,b,k/0.4) : (k < 0.75 ? mix(b,c,(k-0.4)/0.35) : mix(c,d,(k-0.75)/0.25));
 }
-void main(){
+void shade(){
   float t = v_m.x, type = v_m.y, seed = v_m.z, am = v_m.w;
   vec2 p = v_uv; float r = length(p);
   if (r > 1.0) discard;
@@ -59,7 +60,7 @@ void main(){
     float d = r + (n - 0.5) * 0.85;
     float a = smoothstep(1.0, 0.3, d) * smoothstep(1.0, 0.7, r) * (1.0 - t) * (1.0 - t) * 0.75 * am;
     vec3 col = type < 1.5 ? mix(vec3(0.22,0.22,0.24), vec3(0.72,0.72,0.76), n * (1.0 - t*0.3)) : mix(vec3(0.35,0.28,0.2), vec3(0.62,0.55,0.45), n);
-    o = vec4(col * a, a);
+    o = vec4(col * u_light * a, a);
   } else if (type < 2.5) {                            // ВСПЫШКА (звезда)
     float ang = atan(p.y, p.x);
     float spikes = pow(abs(cos(ang * 2.5 + seed * 6.28)), 10.0) + 0.6 * pow(abs(cos(ang * 4.0 + seed * 3.0)), 24.0);
@@ -72,6 +73,7 @@ void main(){
     o = vec4(mix(vec3(1.0,0.9,0.6), vec3(1.0,0.35,0.05), t) * a * (1.0 - t*0.6) * 2.0 * am, 0.0);
   }
 }
+void main(){ shade(); o.rgb *= u_outScale; }
 )";
 
 static GLuint compileShader(GLenum type, const char* src) {
@@ -96,6 +98,7 @@ bool Particles::init() {
     if (!ok) { ENG_LOG("particle program link failed"); return false; }
     uVP_ = glGetUniformLocation(prog_, "u_vp"); uRight_ = glGetUniformLocation(prog_, "u_right");
     uUp_ = glGetUniformLocation(prog_, "u_up"); uCam_ = glGetUniformLocation(prog_, "u_cam");
+    uOut_ = glGetUniformLocation(prog_, "u_outScale"); uLight_ = glGetUniformLocation(prog_, "u_light");
     glGenVertexArrays(1, &vao_);
     glBindVertexArray(vao_);
     const float quad[8] = {-1, -1, 1, -1, -1, 1, 1, 1};
@@ -125,7 +128,40 @@ void Particles::release() {
     ibufCap_ = 0;
 }
 
-void Particles::clear() { ps_.clear(); emitters_.clear(); lights_.clear(); }
+void Particles::clear() { ps_.clear(); emitters_.clear(); lights_.clear(); steady_.clear(); time_ = 0; }
+
+void Particles::emitFire(Vec3 pos, float s, float dt, float* acc) {
+    acc[0] += dt * 70.f * s;
+    while (acc[0] >= 1.f) {
+        acc[0] -= 1.f;
+        Particle p; p.type = P_FIRE; p.pos = pos + Vec3(rr(-0.09f, 0.09f), rr(0, 0.05f), rr(-0.09f, 0.09f)) * s;
+        p.vel = Vec3(rr(-0.15f, 0.15f), rr(0.9f, 1.8f), rr(-0.15f, 0.15f)) * s;
+        p.maxLife = rr(0.55f, 1.0f); p.size0 = rr(0.22f, 0.34f) * s; p.size1 = 0.06f * s; p.drag = 0.6f; p.rotVel = rr(-1, 1); p.seed = rnd();
+        add(p);
+    }
+}
+void Particles::emitSmoke(Vec3 pos, float s, float dt, float* acc) {
+    acc[1] += dt * 14.f * s;
+    while (acc[1] >= 1.f) {
+        acc[1] -= 1.f;
+        smokePuff(pos + Vec3(rr(-0.05f, 0.05f), 0, rr(-0.05f, 0.05f)) * s, rr(0.8f, 1.2f) * s, rr(2.5f, 3.8f));
+    }
+}
+void Particles::emitSparks(Vec3 pos, Vec3 dir, float s, float dt, float* acc) {
+    acc[2] += dt * 18.f * s;
+    dir = normalize(dir);
+    while (acc[2] >= 1.f) {
+        acc[2] -= 1.f;
+        Particle p; p.type = P_SPARK; p.pos = pos;
+        p.vel = normalize(dir + rndDir() * 0.7f) * rr(1.5f, 5.f) * s; p.maxLife = rr(0.5f, 1.4f); p.size0 = 0.02f * s; p.drag = 0.2f; p.seed = rnd();
+        add(p);
+    }
+}
+void Particles::fireLight(Vec3 pos, float s, float phase) {
+    float fl = 1.f + 0.3f * std::sin(phase * 23.f + pos.x * 5.f) + 0.2f * std::sin(phase * 37.f + pos.z * 3.f);
+    PointLight l; l.pos = pos + Vec3(0, 0.35f * s, 0); l.color = {1.f, 0.5f, 0.15f}; l.radius = 5.f * s; l.maxLife = 1; l.life = 0; l.intensity = 2.6f * fl * s;
+    steady_.push_back(l);
+}
 
 void Particles::addLight(Vec3 pos, Vec3 color, float radius, float life, float intensity) {
     PointLight l;
@@ -137,6 +173,7 @@ void Particles::addLight(Vec3 pos, Vec3 color, float radius, float life, float i
 int Particles::lights(PointLight* out, int maxN) const {
     // самые яркие источники
     std::vector<PointLight> v = lights_;
+    v.insert(v.end(), steady_.begin(), steady_.end());
     for (const Emitter& e : emitters_) {
         PointLight l;
         float fl = 1.f + 0.35f * std::sin(time_ * 23.f + e.pos.x * 5.f) + 0.25f * std::sin(time_ * 37.f + e.pos.z * 3.f);
@@ -309,6 +346,8 @@ void Particles::render(const Mat4& vp, Vec3 camRight, Vec3 camUp, Vec3 camPos) {
     glUniform3f(uRight_, camRight.x, camRight.y, camRight.z);
     glUniform3f(uUp_, camUp.x, camUp.y, camUp.z);
     glUniform3f(uCam_, camPos.x, camPos.y, camPos.z);
+    glUniform1f(uOut_, outScale_);
+    glUniform1f(uLight_, lightScale_);
     glBindVertexArray(vao_);
     glEnable(GL_DEPTH_TEST);
     glDepthMask(GL_FALSE);

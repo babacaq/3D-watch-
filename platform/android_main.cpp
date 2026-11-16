@@ -1,159 +1,147 @@
-// Android: NativeActivity + EGL + OpenGL ES 3.0. Файлы модели приходят из Java (MainActivity) через очередь takePending().
-#include <android/asset_manager.h>
+// Android: NativeActivity + EGL + OpenGL ES 3.0. Java (MainActivity) даёт выбор файлов, сохранение в галерею и кодер MP4.
 #include <android/input.h>
+#include <android/keycodes.h>
 #include <android/native_activity.h>
 #include <android/native_window.h>
 #include <android_native_app_glue.h>
-#include <dirent.h>
 #include <jni.h>
 #include <sys/stat.h>
 #include <time.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include <vector>
 
-#include "engine.h"
+#include "app.h"
+#include "importer.h"
 #include "log.h"
 
 using namespace eng;
 
 namespace {
 
-struct App {
+struct Host {
     android_app* app = nullptr;
-    Engine engine;
+    App papp;
     EGLDisplay dpy = EGL_NO_DISPLAY;
     EGLSurface surf = EGL_NO_SURFACE;
     EGLContext ctx = EGL_NO_CONTEXT;
     EGLConfig cfg = nullptr;
     bool glOk = false, focused = false, started = false;
     int w = 0, h = 0;
+    float density = 2.7f;
     JNIEnv* env = nullptr;
-    jmethodID midOpen = nullptr, midTake = nullptr;
-    std::vector<std::string> initialLoaded;
+    jmethodID midOpen = nullptr, midTake = nullptr, midSavePng = nullptr, midToast = nullptr;
+    jmethodID midVBegin = nullptr, midVFrame = nullptr, midVEnd = nullptr, midVCancel = nullptr;
 };
 
-bool readAll(const std::string& path, std::vector<uint8_t>& out) {
-    FILE* f = fopen(path.c_str(), "rb");
-    if (!f) return false;
-    fseek(f, 0, SEEK_END);
-    long n = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    if (n < 0) { fclose(f); return false; }
-    out.resize((size_t)n);
-    size_t r = n ? fread(out.data(), 1, (size_t)n, f) : 0;
-    fclose(f);
-    return r == (size_t)n;
+std::string jstr(JNIEnv* env, jstring js) {
+    if (!js) return "";
+    const char* cs = env->GetStringUTFChars(js, nullptr);
+    std::string s = cs ? cs : "";
+    if (cs) env->ReleaseStringUTFChars(js, cs);
+    return s;
 }
 
-std::string dirOf(const std::string& p) { size_t i = p.find_last_of('/'); return i == std::string::npos ? "" : p.substr(0, i + 1); }
-std::string baseOf(const std::string& p) { size_t i = p.find_last_of("/\\"); return i == std::string::npos ? p : p.substr(i + 1); }
-
-std::string urlDecode(const std::string& s) {
-    std::string o;
-    for (size_t i = 0; i < s.size(); i++) {
-        if (s[i] == '%' && i + 2 < s.size() && isxdigit((unsigned char)s[i + 1]) && isxdigit((unsigned char)s[i + 2])) {
-            o += (char)strtol(s.substr(i + 1, 2).c_str(), nullptr, 16);
-            i += 2;
-        } else o += s[i];
-    }
-    return o;
+bool clearExc(JNIEnv* env) {
+    if (env->ExceptionCheck()) { env->ExceptionDescribe(); env->ExceptionClear(); return true; }
+    return false;
 }
 
-void loadFromDisk(App& a, const std::string& path) {
-    std::vector<uint8_t> data;
-    if (!readAll(path, data)) { a.engine.setStatus("CANNOT READ " + baseOf(path)); return; }
-    std::string dir = dirOf(path);
-    FileReader rd = [dir](const std::string& rel, std::vector<uint8_t>& out) {
-        std::string r = rel;
-        for (char& c : r) if (c == '\\') c = '/';
-        if (readAll(dir + r, out)) return true;
-        std::string d = urlDecode(r);
-        if (readAll(dir + d, out)) return true;
-        return readAll(dir + baseOf(d), out);  // плоская копия из выбора файлов
-    };
-    std::string err;
-    a.engine.addModelFile(baseOf(path), data.data(), data.size(), rd, &err);
-}
-
-void loadFromAssets(App& a, const std::string& fileName) {
-    AAssetManager* am = a.app->activity->assetManager;
-    auto readAsset = [am](const std::string& name, std::vector<uint8_t>& out) {
-        AAsset* as = AAssetManager_open(am, name.c_str(), AASSET_MODE_BUFFER);
-        if (!as) return false;
-        off_t n = AAsset_getLength(as);
-        out.resize((size_t)n);
-        int r = n ? AAsset_read(as, out.data(), (size_t)n) : 0;
-        AAsset_close(as);
-        return r == (int)n;
-    };
-    std::vector<uint8_t> data;
-    if (!readAsset("models/" + fileName, data)) return;
-    FileReader rd = [readAsset](const std::string& rel, std::vector<uint8_t>& out) {
-        std::string r = rel;
-        for (char& c : r) if (c == '\\') c = '/';
-        return readAsset("models/" + r, out) || readAsset("models/" + baseOf(r), out);
-    };
-    std::string err;
-    a.engine.addModelFile(fileName, data.data(), data.size(), rd, &err);
-}
-
-void listDir(const std::string& dir, std::vector<std::string>& files, int depth) {
-    DIR* d = opendir(dir.c_str());
-    if (!d) return;
-    while (dirent* e = readdir(d)) {
-        std::string n = e->d_name;
-        if (n == "." || n == "..") continue;
-        std::string full = dir + "/" + n;
-        struct stat st;
-        if (stat(full.c_str(), &st) != 0) continue;
-        if (S_ISDIR(st.st_mode)) { if (depth > 0) listDir(full, files, depth - 1); }
-        else if (isSupportedModelFile(n)) files.push_back(full);
-    }
-    closedir(d);
-}
-
-// --- JNI ---
-bool attachJni(App& a) {
+bool attachJni(Host& a) {
     JavaVM* vm = a.app->activity->vm;
     if (vm->AttachCurrentThread(&a.env, nullptr) != JNI_OK) return false;
     jclass cls = a.env->GetObjectClass(a.app->activity->clazz);
     a.midOpen = a.env->GetMethodID(cls, "openPicker", "()V");
     a.midTake = a.env->GetMethodID(cls, "takePending", "()Ljava/lang/String;");
+    a.midSavePng = a.env->GetMethodID(cls, "savePng", "(Ljava/lang/String;[B)Z");
+    a.midToast = a.env->GetMethodID(cls, "toast", "(Ljava/lang/String;)V");
+    a.midVBegin = a.env->GetMethodID(cls, "videoBegin", "(IIIILjava/lang/String;)Z");
+    a.midVFrame = a.env->GetMethodID(cls, "videoFrame", "(Ljava/nio/ByteBuffer;III)Z");
+    a.midVEnd = a.env->GetMethodID(cls, "videoEnd", "()Z");
+    a.midVCancel = a.env->GetMethodID(cls, "videoCancel", "()V");
     a.env->DeleteLocalRef(cls);
-    if (a.env->ExceptionCheck()) { a.env->ExceptionClear(); a.midOpen = a.midTake = nullptr; }
-    return a.midOpen && a.midTake;
+    if (clearExc(a.env)) return false;
+    return true;
 }
 
-void requestPicker(App& a) {
-    if (!a.env || !a.midOpen) { a.engine.setStatus("OPEN IS NOT AVAILABLE"); return; }
-    a.env->CallVoidMethod(a.app->activity->clazz, a.midOpen);
-    if (a.env->ExceptionCheck()) { a.env->ExceptionClear(); a.engine.setStatus("PICKER FAILED"); }
+void setupPlatform(Host& a) {
+    Platform& p = a.papp.plat;
+    const char* ext = a.app->activity->externalDataPath;
+    const char* in = a.app->activity->internalDataPath;
+    p.dataDir = ext ? ext : (in ? in : "/data/local/tmp");
+    mkdir(p.dataDir.c_str(), 0755);
+    Host* h = &a;
+    p.importModels = [h]() {
+        if (!h->env || !h->midOpen) return;
+        h->env->CallVoidMethod(h->app->activity->clazz, h->midOpen);
+        clearExc(h->env);
+    };
+    p.savePng = [h](const std::string& name, const std::vector<uint8_t>& png) {
+        if (!h->env || !h->midSavePng) return false;
+        jstring jn = h->env->NewStringUTF(name.c_str());
+        jbyteArray arr = h->env->NewByteArray((jsize)png.size());
+        if (!arr) { h->env->DeleteLocalRef(jn); clearExc(h->env); return false; }
+        h->env->SetByteArrayRegion(arr, 0, (jsize)png.size(), (const jbyte*)png.data());
+        jboolean ok = h->env->CallBooleanMethod(h->app->activity->clazz, h->midSavePng, jn, arr);
+        h->env->DeleteLocalRef(jn);
+        h->env->DeleteLocalRef(arr);
+        return !clearExc(h->env) && ok;
+    };
+    p.videoBegin = [h](int w, int hh, int fps, int mbps, const std::string& name) {
+        if (!h->env || !h->midVBegin) return false;
+        jstring jn = h->env->NewStringUTF(name.c_str());
+        jboolean ok = h->env->CallBooleanMethod(h->app->activity->clazz, h->midVBegin, w, hh, fps, mbps, jn);
+        h->env->DeleteLocalRef(jn);
+        return !clearExc(h->env) && ok;
+    };
+    p.videoFrame = [h](const uint8_t* rgba, int w, int hh, int index) {
+        if (!h->env || !h->midVFrame) return false;
+        jobject bb = h->env->NewDirectByteBuffer((void*)rgba, (jlong)w * hh * 4);
+        jboolean ok = h->env->CallBooleanMethod(h->app->activity->clazz, h->midVFrame, bb, w, hh, index);
+        h->env->DeleteLocalRef(bb);
+        return !clearExc(h->env) && ok;
+    };
+    p.videoEnd = [h]() {
+        if (!h->env || !h->midVEnd) return false;
+        jboolean ok = h->env->CallBooleanMethod(h->app->activity->clazz, h->midVEnd);
+        return !clearExc(h->env) && ok;
+    };
+    p.videoCancel = [h]() {
+        if (!h->env || !h->midVCancel) return;
+        h->env->CallVoidMethod(h->app->activity->clazz, h->midVCancel);
+        clearExc(h->env);
+    };
 }
 
-void pollPending(App& a) {
+void pollPending(Host& a) {
     if (!a.env || !a.midTake) return;
     jstring js = (jstring)a.env->CallObjectMethod(a.app->activity->clazz, a.midTake);
-    if (a.env->ExceptionCheck()) { a.env->ExceptionClear(); return; }
-    if (!js) return;
-    const char* cs = a.env->GetStringUTFChars(js, nullptr);
-    std::string all = cs ? cs : "";
-    if (cs) a.env->ReleaseStringUTFChars(js, cs);
+    if (clearExc(a.env) || !js) return;
+    std::string all = jstr(a.env, js);
     a.env->DeleteLocalRef(js);
     size_t pos = 0;
+    int ok = 0, bad = 0;
+    std::string lastErr;
     while (pos < all.size()) {
         size_t nl = all.find('\n', pos);
         if (nl == std::string::npos) nl = all.size();
         std::string p = all.substr(pos, nl - pos);
         pos = nl + 1;
-        if (!p.empty() && isSupportedModelFile(p)) loadFromDisk(a, p);
+        if (p.empty() || !isSupportedModelFile(p)) continue;
+        std::string err;
+        if (a.papp.importModelPath(p, &err)) ok++;
+        else { bad++; lastErr = err; }
     }
+    if (ok) a.papp.toast(ok == 1 ? "Модель добавлена" : "Моделей добавлено: " + std::to_string(ok));
+    if (bad) a.papp.toast("Не удалось открыть модель: " + lastErr);
+    if (!ok && !bad) a.papp.toast("Среди выбранных файлов нет моделей (OBJ, GLB, GLTF, STL)");
 }
 
 // --- EGL ---
-bool initEgl(App& a) {
+bool initEgl(Host& a) {
     a.dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     if (a.dpy == EGL_NO_DISPLAY || !eglInitialize(a.dpy, nullptr, nullptr)) return false;
     const EGLint ca[] = {EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT, EGL_RED_SIZE, 8,
@@ -161,7 +149,7 @@ bool initEgl(App& a) {
     EGLint n = 0;
     if (!eglChooseConfig(a.dpy, ca, &a.cfg, 1, &n) || n < 1) {
         const EGLint cb[] = {EGL_SURFACE_TYPE, EGL_WINDOW_BIT, EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT, EGL_RED_SIZE, 8,
-                             EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_DEPTH_SIZE, 16, EGL_NONE};
+                             EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_NONE};
         if (!eglChooseConfig(a.dpy, cb, &a.cfg, 1, &n) || n < 1) return false;
     }
     const EGLint cx[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
@@ -169,7 +157,7 @@ bool initEgl(App& a) {
     return a.ctx != EGL_NO_CONTEXT;
 }
 
-bool createSurface(App& a) {
+bool createSurface(Host& a) {
     a.surf = eglCreateWindowSurface(a.dpy, a.cfg, a.app->window, nullptr);
     if (a.surf == EGL_NO_SURFACE) return false;
     if (!eglMakeCurrent(a.dpy, a.surf, a.surf, a.ctx)) return false;
@@ -179,71 +167,80 @@ bool createSurface(App& a) {
     return true;
 }
 
-void destroySurface(App& a) {
+void destroySurface(Host& a) {
     if (a.dpy == EGL_NO_DISPLAY) return;
     eglMakeCurrent(a.dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     if (a.surf != EGL_NO_SURFACE) eglDestroySurface(a.dpy, a.surf);
     a.surf = EGL_NO_SURFACE;
 }
 
-void shutdownEgl(App& a) {
+void shutdownEgl(Host& a) {
     destroySurface(a);
     if (a.ctx != EGL_NO_CONTEXT) eglDestroyContext(a.dpy, a.ctx);
     if (a.dpy != EGL_NO_DISPLAY) eglTerminate(a.dpy);
-    a.ctx = EGL_NO_CONTEXT; a.dpy = EGL_NO_DISPLAY;
+    a.ctx = EGL_NO_CONTEXT;
+    a.dpy = EGL_NO_DISPLAY;
 }
 
-void onWindowReady(App& a) {
+float queryDensity(Host& a, int w) {
+    // dp-масштаб из плотности экрана; интерфейс рассчитан примерно на 360-440 dp по ширине
+    int32_t dpi = AConfiguration_getDensity(a.app->config);
+    float byWidth = w / 400.f;
+    if (dpi <= 0 || dpi >= 1000) return byWidth;
+    float d = dpi / 160.f;
+    return std::max(1.f, std::min(d, byWidth * 1.15f));
+}
+
+void onWindowReady(Host& a) {
     if (!a.app->window) return;
     if (a.dpy == EGL_NO_DISPLAY && !initEgl(a)) { ENG_LOG("EGL init failed"); return; }
     if (!createSurface(a)) { ENG_LOG("surface failed"); return; }
-    if (!a.engine.initGL(a.w, a.h)) { ENG_LOG("engine initGL failed"); a.engine.setStatus("OPENGL ES 3 INIT FAILED"); return; }
+    a.density = queryDensity(a, a.w);
+    if (!a.papp.initGL(a.w, a.h, a.density)) {
+        ENG_LOG("PrismLab initGL failed");
+        a.papp.toast("Не удалось запустить OpenGL ES 3.0");
+        return;
+    }
     a.glOk = true;
     if (!a.started) {
         a.started = true;
-        // модели из assets/models и из внутренней папки приложения
-        AAssetManager* am = a.app->activity->assetManager;
-        if (AAssetDir* d = AAssetManager_openDir(am, "models")) {
-            std::vector<std::string> names;
-            while (const char* n = AAssetDir_getNextFileName(d)) if (isSupportedModelFile(n)) names.push_back(n);
-            AAssetDir_close(d);
-            for (const auto& n : names) loadFromAssets(a, n);
-        }
-        const char* ext = a.app->activity->externalDataPath;
-        if (ext) {
-            std::vector<std::string> files;
-            listDir(std::string(ext) + "/models", files, 2);
-            if (files.size() > 6) files.erase(files.begin(), files.end() - 6);
-            for (const auto& f : files) loadFromDisk(a, f);
-        }
+        a.papp.loadAutosave();
     }
 }
 
-void onWindowLost(App& a) {
-    if (a.glOk) { a.engine.releaseGL(); a.glOk = false; }
+void onWindowLost(Host& a) {
+    if (a.glOk) { a.papp.onPause(); a.papp.shutdown(); a.glOk = false; }
     destroySurface(a);
 }
 
 void handleCmd(android_app* app, int32_t cmd) {
-    App& a = *(App*)app->userData;
+    Host& a = *(Host*)app->userData;
     switch (cmd) {
         case APP_CMD_INIT_WINDOW: onWindowReady(a); break;
         case APP_CMD_TERM_WINDOW: onWindowLost(a); break;
         case APP_CMD_GAINED_FOCUS: a.focused = true; break;
         case APP_CMD_LOST_FOCUS: a.focused = false; break;
-        case APP_CMD_DESTROY: break;
+        case APP_CMD_PAUSE: if (a.glOk) a.papp.onPause(); break;
         default: break;
     }
 }
 
 int32_t handleInput(android_app* app, AInputEvent* ev) {
-    App& a = *(App*)app->userData;
-    if (AInputEvent_getType(ev) != AINPUT_EVENT_TYPE_MOTION || !a.glOk) return 0;
+    Host& a = *(Host*)app->userData;
+    int type = AInputEvent_getType(ev);
+    if (type == AINPUT_EVENT_TYPE_KEY) {
+        if (AKeyEvent_getKeyCode(ev) == AKEYCODE_BACK) {
+            if (AKeyEvent_getAction(ev) == AKEY_EVENT_ACTION_UP && a.glOk) return a.papp.onBack() ? 1 : 0;
+            return a.glOk ? 1 : 0;  // нажатие поглощаем, решаем при отпускании
+        }
+        return 0;
+    }
+    if (type != AINPUT_EVENT_TYPE_MOTION || !a.glOk) return 0;
     int32_t act = AMotionEvent_getAction(ev);
     int32_t kind = act & AMOTION_EVENT_ACTION_MASK;
     int idx = (act & AMOTION_EVENT_ACTION_POINTER_INDEX_MASK) >> AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT;
     auto send = [&](int action, int i) {
-        a.engine.touch(action, AMotionEvent_getPointerId(ev, i), AMotionEvent_getX(ev, i), AMotionEvent_getY(ev, i));
+        a.papp.touch(action, AMotionEvent_getPointerId(ev, i), AMotionEvent_getX(ev, i), AMotionEvent_getY(ev, i));
     };
     switch (kind) {
         case AMOTION_EVENT_ACTION_DOWN: send(0, 0); break;
@@ -266,16 +263,15 @@ double nowSec() {
 }  // namespace
 
 void android_main(android_app* app) {
-    App a;
+    Host a;
     a.app = app;
     app->userData = &a;
     app->onAppCmd = handleCmd;
     app->onInputEvent = handleInput;
     bool jni = attachJni(a);
-    a.engine.onOpenRequest = [&a]() { requestPicker(a); };
-    if (!jni) ENG_LOG("JNI bridge unavailable: OPEN disabled");
+    if (!jni) ENG_LOG("JNI bridge unavailable");
+    setupPlatform(a);
 
-    double last = nowSec();
     int frame = 0;
     while (!app->destroyRequested) {
         int events;
@@ -286,28 +282,29 @@ void android_main(android_app* app) {
         }
         if (app->destroyRequested) break;
         if (!a.glOk || a.surf == EGL_NO_SURFACE) continue;
-        if ((frame++ & 15) == 0 && a.glOk) pollPending(a);
+        if ((frame++ & 15) == 0) pollPending(a);
         EGLint w = 0, h = 0;
         eglQuerySurface(a.dpy, a.surf, EGL_WIDTH, &w);
         eglQuerySurface(a.dpy, a.surf, EGL_HEIGHT, &h);
-        if (w > 0 && h > 0 && (w != a.w || h != a.h)) { a.w = w; a.h = h; a.engine.resize(w, h); }
-        double t = nowSec();
-        float dt = (float)(t - last);
-        last = t;
-        a.engine.update(dt);
-        a.engine.render();
+        if (w > 0 && h > 0 && (w != a.w || h != a.h)) {
+            a.w = w; a.h = h;
+            a.density = queryDensity(a, w);
+            a.papp.resize(w, h, a.density);
+        }
+        a.papp.frame(nowSec());
         if (!eglSwapBuffers(a.dpy, a.surf)) {
             EGLint err = eglGetError();
             if (err == EGL_BAD_SURFACE || err == EGL_BAD_NATIVE_WINDOW) { ENG_LOG("surface lost"); }
             else if (err == EGL_CONTEXT_LOST) {
                 ENG_LOG("context lost: recreating");
-                a.engine.releaseGL(); a.glOk = false;
+                a.papp.shutdown();
+                a.glOk = false;
                 shutdownEgl(a);
                 onWindowReady(a);
             }
         }
     }
-    if (a.glOk) a.engine.releaseGL();
+    if (a.glOk) { a.papp.onPause(); a.papp.shutdown(); }
     shutdownEgl(a);
     if (a.env) app->activity->vm->DetachCurrentThread();
 }

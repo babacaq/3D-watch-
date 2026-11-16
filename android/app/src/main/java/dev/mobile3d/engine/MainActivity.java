@@ -2,11 +2,16 @@ package dev.mobile3d.engine;
 
 import android.app.NativeActivity;
 import android.content.ClipData;
+import android.content.ContentResolver;
+import android.content.ContentValues;
 import android.content.Intent;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Environment;
+import android.provider.MediaStore;
 import android.provider.OpenableColumns;
+import android.view.WindowManager;
 import android.view.View;
 import android.widget.Toast;
 
@@ -18,17 +23,23 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Окно целиком рисует нативный код (C++/OpenGL ES). Java нужна для двух вещей:
- * выбор файлов через системный диалог (OBJ+MTL+текстуры, GLTF+BIN, GLB, STL) и открытие моделей через «Открыть с помощью».
- * Выбранные файлы копируются в папку приложения, а нативный код забирает их пути через takePending().
+ * Окно целиком рисует нативный код (C++/OpenGL ES). Java нужна для:
+ *  - выбора файлов через системный диалог (OBJ+MTL+текстуры, GLTF+BIN, GLB, STL) и «Открыть с помощью»;
+ *    файлы копируются в папку приложения, а нативный код забирает пути через takePending();
+ *  - сохранения скриншотов в галерею (Pictures/PrismLab) и записи MP4 (Movies/PrismLab) через VideoExporter.
  */
 public class MainActivity extends NativeActivity {
     private static final int REQ_PICK = 1001;
     private final List<String> pending = new ArrayList<>();
+    private VideoExporter video;
 
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
+        video = new VideoExporter(this);
+        if (android.os.Build.VERSION.SDK_INT >= 28) {
+            getWindow().getAttributes().layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+        }
         handleIntent(getIntent());
     }
 
@@ -49,7 +60,42 @@ public class MainActivity extends NativeActivity {
         }
     }
 
-    /** Вызывается из C++ (кнопка OPEN). */
+    /** Из C++: короткое сообщение поверх окна. */
+    public void toast(final String msg) {
+        runOnUiThread(() -> Toast.makeText(this, msg, Toast.LENGTH_SHORT).show());
+    }
+
+    /** Из C++: сохранить PNG в Pictures/PrismLab. */
+    public boolean savePng(String name, byte[] png) {
+        try {
+            ContentResolver cr = getContentResolver();
+            ContentValues cv = new ContentValues();
+            cv.put(MediaStore.Images.Media.DISPLAY_NAME, name);
+            cv.put(MediaStore.Images.Media.MIME_TYPE, "image/png");
+            cv.put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/PrismLab");
+            cv.put(MediaStore.Images.Media.IS_PENDING, 1);
+            Uri uri = cr.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv);
+            if (uri == null) return false;
+            try (OutputStream os = cr.openOutputStream(uri)) {
+                if (os == null) return false;
+                os.write(png);
+            }
+            ContentValues done = new ContentValues();
+            done.put(MediaStore.Images.Media.IS_PENDING, 0);
+            cr.update(uri, done, null, null);
+            return true;
+        } catch (Throwable e) {
+            android.util.Log.e("PrismLab", "save png failed", e);
+            return false;
+        }
+    }
+
+    public boolean videoBegin(int w, int h, int fps, int mbps, String name) { return video.begin(w, h, fps, mbps, name); }
+    public boolean videoFrame(java.nio.ByteBuffer rgba, int w, int h, int index) { return video.frame(rgba, w, h, index); }
+    public boolean videoEnd() { return video.end(); }
+    public void videoCancel() { video.cancel(); }
+
+    /** Вызывается из C++ (кнопка «Импорт»). */
     public void openPicker() {
         runOnUiThread(() -> {
             try {
@@ -59,7 +105,7 @@ public class MainActivity extends NativeActivity {
                 i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
                 startActivityForResult(i, REQ_PICK);
             } catch (Exception e) {
-                Toast.makeText(this, "File picker unavailable", Toast.LENGTH_LONG).show();
+                Toast.makeText(this, "Не удалось открыть выбор файлов", Toast.LENGTH_LONG).show();
             }
         });
     }
@@ -108,7 +154,7 @@ public class MainActivity extends NativeActivity {
                     while ((n = in.read(buf)) > 0) os.write(buf, 0, n);
                     done.add(out.getAbsolutePath());
                 } catch (Exception e) {
-                    runOnUiThread(() -> Toast.makeText(this, "Cannot read file: " + e.getMessage(), Toast.LENGTH_LONG).show());
+                    runOnUiThread(() -> Toast.makeText(this, "Не удалось прочитать файл: " + e.getMessage(), Toast.LENGTH_LONG).show());
                 }
             }
             synchronized (this) {

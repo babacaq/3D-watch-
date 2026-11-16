@@ -1,16 +1,20 @@
-# Десктопная сборка ТОЛЬКО для тестов (APK собирается через android/ и Gradle).
+# Десктопная сборка ТОЛЬКО для проверок на компьютере (APK собирается через android/ и Gradle).
+# Нужны Mesa/EGL/GLES и zlib; рисование идёт без окна (surfaceless EGL).
 cmake_minimum_required(VERSION 3.16)
-project(mobile3d_tests CXX)
+project(prismlab_tests CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include_directories(engine)
 file(GLOB ENGINE_SRC engine/*.cpp)
-
-add_executable(physics_test tests/physics_test.cpp engine/physics.cpp)
-add_executable(import_test tests/import_test.cpp engine/importer.cpp engine/gltf.cpp engine/image.cpp engine/model.cpp)
 find_library(GLES NAMES GLESv2 libGLESv2.so.2)
 find_library(EGLLIB NAMES EGL libEGL.so.1)
 find_package(ZLIB REQUIRED)
-target_link_libraries(import_test ${GLES} ZLIB::ZLIB)
-add_executable(desktop_test platform/desktop_test.cpp ${ENGINE_SRC})
-target_link_libraries(desktop_test ${GLES} ${EGLLIB} ZLIB::ZLIB)
+
+add_executable(physics_test tests/physics_test.cpp engine/physics.cpp)
+add_executable(import_test tests/import_test.cpp ${ENGINE_SRC})
+add_executable(scene_test tests/scene_test.cpp ${ENGINE_SRC})
+add_executable(render_test tests/render_test.cpp ${ENGINE_SRC})
+add_executable(app_test platform/app_test.cpp ${ENGINE_SRC})
+foreach(t import_test scene_test render_test app_test)
+  target_link_libraries(${t} ${GLES} ${EGLLIB} ZLIB::ZLIB)
+endforeach()

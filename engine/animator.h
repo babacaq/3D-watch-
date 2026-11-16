@@ -17,6 +17,9 @@ public:
     // Переключиться на клип с плавным переходом (blend секунд).
     void play(int clip, float blend = 0.25f);
     void update(float dt);
+    // Произвольный доступ по времени (для таймлайна): клип A в момент timeA, при w>0 плавно смешивается с клипом B.
+    // clipA < 0 - поза покоя.
+    void evaluate(int clipA, float timeA, int clipB = -1, float timeB = 0, float w = 0);
 
     int current() const { return cur_.clip; }
     float time() const { return cur_.time; }

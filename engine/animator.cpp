@@ -114,6 +114,25 @@ void Animator::update(float dt) {
     computeMatrices();
 }
 
+void Animator::evaluate(int clipA, float timeA, int clipB, float timeB, float w) {
+    if (!model_) return;
+    int nc = (int)model_->clips.size();
+    if (clipA < 0 || clipA >= nc) { restPose(pose_); computeMatrices(); return; }
+    sample(model_->clips[clipA], timeA, pose_);
+    if (clipB >= 0 && clipB < nc && w > 0.f) {
+        sample(model_->clips[clipB], timeB, poseA_);
+        w = std::min(w, 1.f);
+        w = w * w * (3.f - 2.f * w);
+        // w - вес клипа B (куда переходим): pose_ = A, poseA_ = B
+        for (size_t i = 0; i < pose_.t.size(); i++) {
+            pose_.t[i] = lerp(pose_.t[i], poseA_.t[i], w);
+            pose_.s[i] = lerp(pose_.s[i], poseA_.s[i], w);
+            pose_.r[i] = nlerp(pose_.r[i], poseA_.r[i], w);
+        }
+    }
+    computeMatrices();
+}
+
 void Animator::computeMatrices() {
     for (int i : model_->order) {
         Mat4 local = trs(pose_.t[i], pose_.r[i], pose_.s[i]);

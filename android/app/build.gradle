@@ -8,8 +8,8 @@ android {
     ndkVersion '26.3.11579264'
 
     defaultConfig {
-        applicationId 'dev.mobile3d.engine'
-        minSdk 24
+        applicationId 'dev.prismlab.app'
+        minSdk 29
         targetSdk 34
         versionCode 1
         versionName '1.0'

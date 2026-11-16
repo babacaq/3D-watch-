@@ -1,4 +1,4 @@
-name: Build APK
+name: Build PrismLab APK
 
 on:
   push:
@@ -15,6 +15,7 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # Android SDK уже установлен на раннере; докладываем нужные NDK и CMake
       - name: Install NDK and CMake
         run: |
           SDKM=$(ls "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | head -n 1)
@@ -31,5 +32,5 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Mobile3D-apk
+          name: PrismLab-apk
           path: android/app/build/outputs/apk/release/*.apk
