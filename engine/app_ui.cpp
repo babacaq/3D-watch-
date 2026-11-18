@@ -7,7 +7,7 @@
 
 namespace eng {
 
-static const char* kFxNames[] = {"Огонь", "Дым", "Вспышка выстрела", "Взрыв", "Искры"};
+static const char* kFxNames[] = {"Огонь", "Дым", "Вспышка выстрела", "Взрыв", "Искры", "Кровь"};
 
 static Icon typeIcon(const Object& o) {
     switch (o.type) {
@@ -20,6 +20,7 @@ static Icon typeIcon(const Object& o) {
                 case FxKind::Smoke: return Icon::Smoke;
                 case FxKind::Muzzle: return Icon::Bolt;
                 case FxKind::Explosion: return Icon::Flame;
+                case FxKind::Blood: return Icon::Drop;
                 default: return Icon::Sparks;
             }
     }
@@ -138,76 +139,93 @@ void App::confirm(const std::string& title, const std::string& msg, std::functio
 
 // ============================================================ меню
 void App::openMainMenu() {
-    pickList("Меню", {"Новый проект", "Сохранить проект", "Сохранить как…", "Открыть проект…", "Импортировать модель…", "О PrismLab"},
+    pickList("PrismLab", {"Новый проект", "Импортировать модель…", "О PrismLab"},
              [this](int i) {
                  switch (i) {
-                     case 0: confirm("Новый проект", "Несохранённые изменения будут потеряны. Продолжить?", [this]() { newProject(); }, "Создать"); break;
-                     case 1:
-                         if (scene.name == "Untitled") editText("Имя проекта", "Проект 1", [this](const std::string& s) { saveProjectAs(s); });
-                         else saveProjectAs(scene.name);
-                         break;
-                     case 2: editText("Имя проекта", scene.name == "Untitled" ? "Проект 1" : scene.name, [this](const std::string& s) { saveProjectAs(s); }); break;
-                     case 3: {
-                         auto list = listProjects();
-                         if (list.empty()) { toast("Сохранённых проектов нет"); break; }
-                         pickList("Открыть проект", list, [this, list](int k) { openProject(list[k]); });
-                         break;
-                     }
-                     case 4: if (plat.importModels) plat.importModels(); else toast("Импорт недоступен"); break;
+                     case 0: newProject(); break;
+                     case 1: if (plat.importModels) { newProject(); plat.importModels(); } else toast("Импорт недоступен"); break;
                      default:
                          modal_ = Modal();
                          modal_.kind = Modal::Info;
                          modal_.title = "PrismLab";
-                         modal_.msg = "Сцены и анимация на телефоне: импорт моделей OBJ, GLB/glTF и STL, ключевые кадры, прицепление предметов к костям, огонь, дым и вспышки, экспорт PNG и MP4.\nПроект .prisma из Prisma 3D не открывается напрямую: экспортируйте модель в GLB или OBJ.";
+                         modal_.msg = "Сцены и анимация на телефоне: импорт моделей OBJ, GLB/glTF и STL, ключевые кадры, кости и позы, физика, огонь, дым, кровь, вспышки выстрелов и взрывы, экспорт PNG и MP4.\nПроект .proj из Prisma 3D не открывается напрямую: в Prisma 3D выберите экспорт glTF (.gltf вместе с .bin и текстурами) или OBJ и импортируйте сюда.";
                          break;
                  }
              },
-             {Icon::Plus, Icon::Save, Icon::Save, Icon::Folder, Icon::Model, Icon::Gear});
+             {Icon::Plus, Icon::Model, Icon::Gear});
 }
 
 void App::openAddMenu() {
     pickList("Добавить",
-             {"Модель из файла…", "Куб", "Сфера", "Цилиндр", "Конус", "Плоскость", "Солнце", "Точечный свет", "Камера", "Огонь", "Дым", "Вспышка выстрела", "Взрыв", "Искры"},
-             [this](int i) {
-                 scene.pushUndo();
-                 autoSaveDirty_ = true;
-                 int id = -1;
-                 switch (i) {
-                     case 0: if (plat.importModels) plat.importModels(); else toast("Импорт недоступен"); return;
-                     case 1: id = scene.addPrimitive("cube"); break;
-                     case 2: id = scene.addPrimitive("sphere"); break;
-                     case 3: id = scene.addPrimitive("cylinder"); break;
-                     case 4: id = scene.addPrimitive("cone"); break;
-                     case 5: id = scene.addPrimitive("plane"); break;
-                     case 6: id = scene.addLight(LightKind::Sun); break;
-                     case 7: id = scene.addLight(LightKind::Point); break;
-                     case 8: id = scene.addCamera(); break;
-                     case 9: id = scene.addEffect(FxKind::Fire); break;
-                     case 10: id = scene.addEffect(FxKind::Smoke); break;
-                     case 11: id = scene.addEffect(FxKind::Muzzle); break;
-                     case 12: id = scene.addEffect(FxKind::Explosion); break;
-                     case 13: id = scene.addEffect(FxKind::Sparks); break;
-                 }
-                 uploadPending();
-                 if (id >= 0) {
-                     // новые объекты появляются перед камерой вида
-                     Object* o = scene.find(id);
-                     if (o && i != 8 && i != 6) {
-                         Vec3 t, r, s;
-                         scene.localTRS(*o, t, r, s);
-                         if (o->type == ObjType::Model || o->type == ObjType::Effect || o->type == ObjType::Light) {
-                             t.x = target_.x; t.z = target_.z;
-                             if (o->type == ObjType::Light) t.y = target_.y + 2.f;
-                             scene.setLocal(id, t, r, s);
-                         }
-                     }
-                     scene.selected = id;
-                     scene.resetEffects();
-                     scene.simulateTo(curFrame());
-                     if (i == 8) { Object* c = scene.find(id); if (c) { View v = currentView(1.f); scene.setWorld(id, inverse(v.view)); } }
-                 }
-             },
-             {Icon::Folder, Icon::Cube, Icon::Cube, Icon::Cube, Icon::Cube, Icon::Cube, Icon::Sun, Icon::Bulb, Icon::Camera, Icon::Flame, Icon::Smoke, Icon::Bolt, Icon::Flame, Icon::Sparks});
+             {"Модель из файла…", "Куб", "Сфера", "Цилиндр", "Конус", "Плоскость", "Солнце", "Точечный свет", "Камера", "Огонь", "Дым", "Искры",
+              "Выстрел: пистолет", "Выстрел: дробовик", "Выстрел: автомат (очередь)", "Взрыв", "Кровь: брызги", "Кровь: течёт"},
+             [this](int i) { addItem(i); },
+             {Icon::Folder, Icon::Cube, Icon::Cube, Icon::Cube, Icon::Cube, Icon::Cube, Icon::Sun, Icon::Bulb, Icon::Camera, Icon::Flame, Icon::Smoke, Icon::Sparks,
+              Icon::Bolt, Icon::Bolt, Icon::Bolt, Icon::Flame, Icon::Drop, Icon::Drop});
+}
+
+void App::addFxMenu() {
+    pickList("Добавить эффект",
+             {"Огонь", "Дым", "Искры", "Выстрел: пистолет", "Выстрел: дробовик", "Выстрел: автомат (очередь)", "Взрыв", "Кровь: брызги", "Кровь: течёт"},
+             [this](int k) { addItem(9 + k); },
+             {Icon::Flame, Icon::Smoke, Icon::Sparks, Icon::Bolt, Icon::Bolt, Icon::Bolt, Icon::Flame, Icon::Drop, Icon::Drop});
+}
+
+void App::addItem(int i) {
+    scene.pushUndo();
+    autoSaveDirty_ = true;
+    int id = -1;
+    switch (i) {
+        case 0: if (plat.importModels) plat.importModels(); else toast("Импорт недоступен"); return;
+        case 1: id = scene.addPrimitive("cube"); break;
+        case 2: id = scene.addPrimitive("sphere"); break;
+        case 3: id = scene.addPrimitive("cylinder"); break;
+        case 4: id = scene.addPrimitive("cone"); break;
+        case 5: id = scene.addPrimitive("plane"); break;
+        case 6: id = scene.addLight(LightKind::Sun); break;
+        case 7: id = scene.addLight(LightKind::Point); break;
+        case 8: id = scene.addCamera(); break;
+        case 9: id = scene.addEffect(FxKind::Fire); break;
+        case 10: id = scene.addEffect(FxKind::Smoke); break;
+        case 11: id = scene.addEffect(FxKind::Sparks); break;
+        case 12: case 13: case 14: {
+            id = scene.addEffect(FxKind::Muzzle);
+            if (Object* e = scene.find(id)) {
+                e->fxVariant = i - 12;
+                e->fxRate = i == 14 ? 3 : 0;
+                e->fxEnd = e->fxStart + (i == 14 ? 18 : 8);
+            }
+            break;
+        }
+        case 15: id = scene.addEffect(FxKind::Explosion); break;
+        case 16: case 17: {
+            id = scene.addEffect(FxKind::Blood);
+            if (Object* e = scene.find(id)) {
+                e->fxVariant = i - 16;
+                e->fxEnd = e->fxStart + (i == 17 ? 36 : 14);
+            }
+            break;
+        }
+    }
+    uploadPending();
+    if (id >= 0) {
+        // новые объекты появляются в точке, на которую смотрит камера вида
+        Object* o = scene.find(id);
+        if (o && i != 8 && i != 6) {
+            Vec3 t, r, s;
+            scene.localTRS(*o, t, r, s);
+            if (o->type == ObjType::Model || o->type == ObjType::Effect || o->type == ObjType::Light) {
+                t.x = target_.x; t.z = target_.z;
+                if (o->type == ObjType::Light) t.y = target_.y + 2.f;
+                scene.setLocal(id, t, r, s);
+            }
+        }
+        scene.selected = id;
+        scene.resetEffects();
+        scene.simulateTo(curFrame());
+        if (i == 8) { Object* c = scene.find(id); if (c) { View v = currentView(1.f); scene.setWorld(id, inverse(v.view)); } }
+        if (o && o->type == ObjType::Effect) tab_ = Tab::Fx;
+    }
 }
 
 // ============================================================ верх, вьюпорт
@@ -216,11 +234,10 @@ void App::drawTopBar() {
     float S = ui.S;
     g.rect(rTop_, theme::panel, 0);
     g.rect(Rect(0, rTop_.b() - 1, rTop_.w, 1), theme::line, 0);
-    float pad = 8 * S, bs = 40 * S, y = rTop_.y + (rTop_.h - bs) * 0.5f;
-    if (ui.iconBtn(Rect(pad, y, bs, bs), Icon::Menu, false, nullptr, false)) openMainMenu();
-    g.text("PrismLab", pad + bs + 6 * S, rTop_.cy() + 6 * S, 19 * S, theme::text);
-    float x = rTop_.r() - pad;
-    Rect exp(x - 92 * S, y, 92 * S, bs);
+    float pad = 8 * S, bs = (land_ ? 40 : 44) * S, y = rTop_.y + (rTop_.h - bs) * 0.5f;
+    if (ui.iconBtn(Rect(pad, y, bs, bs), Icon::Home, false, nullptr, true)) { goHome(); return; }
+    float xr = rTop_.r() - pad;
+    Rect exp(xr - (land_ ? 108 : 92) * S, y, (land_ ? 108 : 92) * S, bs);
     if (ui.button(exp, "Экспорт", 1, 14)) {
         int n = scene.proj.frameEnd - scene.proj.frameStart + 1;
         pickList("Экспорт из камеры",
@@ -232,11 +249,104 @@ void App::drawTopBar() {
                  },
                  {Icon::Image, Icon::Film, Icon::Gear});
     }
-    x = exp.x - 6 * S;
-    Rect rd(x - bs, y, bs, bs), ud(rd.x - bs - 4 * S, y, bs, bs);
+    xr = exp.x - 6 * S;
+    Rect rd(xr - bs, y, bs, bs), ud(rd.x - bs - 4 * S, y, bs, bs);
     Col dim = theme::textDim;
     if (ui.iconBtn(rd, Icon::Redo, false, scene.canRedo() ? nullptr : &dim, false)) { if (scene.redo()) { scene.resetEffects(); scene.simulateTo(curFrame()); } }
     if (ui.iconBtn(ud, Icon::Undo, false, scene.canUndo() ? nullptr : &dim, false)) { if (scene.undo()) { scene.resetEffects(); scene.simulateTo(curFrame()); } }
+    // имя проекта
+    float nx = pad + bs + 8 * S, nw = ud.x - nx - 6 * S;
+    std::string nm = (scene.name.empty() || scene.name == "Untitled") ? "Без названия" : scene.name;
+    Rect nr(nx, y, std::max(40 * S, nw), bs);
+    g.textIn(nr, g.fit(nm, 16 * S, nr.w - 8 * S), 16 * S, theme::text, 1);
+    if (ui.button(nr, "", 3, 16)) {
+        editText("Имя проекта", nm == "Без названия" ? "Проект 1" : nm, [this](const std::string& s) {
+            std::string old = scene.name;
+            if (!old.empty() && old != "Untitled" && old != s) {
+                renameProject(old, s);
+                scene.name = s;
+            }
+            saveProjectAs(s);
+        });
+    }
+}
+
+bool App::boneScreenPos(const Object& o, int node, float& sx, float& sy) const {
+    if (!o.anim || node < 0 || node >= (int)o.anim->world.size()) return false;
+    return project(transformPoint(o.world * o.fit * o.anim->world[node], {0, 0, 0}), sx, sy);
+}
+
+bool App::boneAtScreen(float x, float y, int& node) const {
+    const Object* o = scene.find(scene.selected);
+    if (!o || o->type != ObjType::Model || !o->anim) return false;
+    float best = ui.dp(30);
+    node = -1;
+    for (int n : scene.boneNodes(*o)) {
+        float sx, sy;
+        if (!boneScreenPos(*o, n, sx, sy)) continue;
+        float d = std::hypot(sx - x, sy - y);
+        if (d < best) { best = d; node = n; }
+    }
+    return node >= 0;
+}
+
+void App::drawBoneOverlay() {
+    const Object* o = scene.find(scene.selected);
+    if (!o || o->type != ObjType::Model || !o->anim || !o->visibleNow) return;
+    if (!showBones_ && tab_ != Tab::Bones) return;
+    const Model& m = *scene.models[o->model].model;
+    std::vector<int> bones = scene.boneNodes(*o);
+    if (bones.empty()) return;
+    Gfx& g = ui.g;
+    float S = ui.S;
+    g.pushClip(viewRect_);
+    std::vector<char> isBone(m.nodes.size(), 0);
+    for (int n : bones) isBone[n] = 1;
+    int cf = curFrame();
+    // кости: линия от родителя к суставу
+    for (int n : bones) {
+        float sx, sy;
+        if (!boneScreenPos(*o, n, sx, sy)) continue;
+        int p = m.nodes[n].parent;
+        while (p >= 0 && !isBone[p]) p = m.nodes[p].parent;
+        if (p >= 0) {
+            float px, py;
+            if (boneScreenPos(*o, p, px, py)) {
+                float dx = sx - px, dy = sy - py, len = std::hypot(dx, dy);
+                if (len > 1.f) {
+                    float nx = -dy / len, ny = dx / len, w = std::min(5.f * S, len * 0.18f);
+                    Col c = (n == selBone_) ? theme::orange : Col(0.3f, 0.85f, 1.f, 0.9f);
+                    g.tri(px + nx * w, py + ny * w, px - nx * w, py - ny * w, sx, sy, c.alpha(0.55f));
+                    g.line(px, py, sx, sy, 1.6f * S, c);
+                }
+            }
+        }
+    }
+    for (int n : bones) {
+        float sx, sy;
+        if (!boneScreenPos(*o, n, sx, sy)) continue;
+        bool sel = n == selBone_;
+        bool keyed = scene.boneHasKey(*o, n, cf);
+        bool any = false;
+        for (auto& tr : o->boneTracks) if (tr.node == n && !tr.keys.empty()) any = true;
+        float r = (sel ? 9.f : 6.5f) * S;
+        Col fill = sel ? theme::orange : (keyed ? theme::keyCol : (any ? Col(1.f, 0.85f, 0.4f, 0.95f) : Col(0.25f, 0.85f, 1.f, 0.95f)));
+        g.circle(sx, sy, r + 1.5f * S, Col(0.02f, 0.02f, 0.08f, 0.8f));
+        g.circle(sx, sy, r, fill);
+        if (sel) g.ring(sx, sy, r + 6 * S, 1.8f * S, theme::orange.alpha(0.9f));
+    }
+    // подпись выбранной кости
+    if (selBone_ >= 0 && selBone_ < (int)m.nodes.size()) {
+        float sx, sy;
+        if (boneScreenPos(*o, selBone_, sx, sy)) {
+            std::string nm = m.nodes[selBone_].name.empty() ? "кость " + std::to_string(selBone_) : m.nodes[selBone_].name;
+            float fs = 12 * S, w = g.textWidth(nm, fs) + 16 * S;
+            Rect r(std::min(std::max(viewRect_.x + 4 * S, sx - w * 0.5f), viewRect_.r() - w - 4 * S), sy - 40 * S, w, 22 * S);
+            g.rect(r, Col(0.04f, 0.03f, 0.1f, 0.75f), 11 * S);
+            g.textIn(r, nm, fs, theme::text, 1);
+        }
+    }
+    g.popClip();
 }
 
 void App::drawViewportOverlay() {
@@ -249,39 +359,48 @@ void App::drawViewportOverlay() {
         g.rect(Rect(rVP_.x, cv.y, cv.x - rVP_.x, cv.h), theme::bg, 0);
         g.rect(Rect(cv.r(), cv.y, rVP_.r() - cv.r(), cv.h), theme::bg, 0);
         g.stroke(cv, theme::accent2.alpha(0.7f), 0, 1.5f * S);
+    } else {
+        drawBoneOverlay();
     }
-    float bs = 42 * S, gap = 6 * S, x = rVP_.x + 8 * S, y = rVP_.y + 8 * S;
+    float bs = (land_ ? 40 : 46) * S, gap = 6 * S;
+    int maxRows = std::max(1, (int)((rVP_.h - 16 * S) / (bs + gap)));
+    auto slot = [&](bool left, int k) {
+        int col = k / maxRows, rw = k % maxRows;
+        float x = left ? rVP_.x + 8 * S + col * (bs + gap) : rVP_.r() - 8 * S - bs - col * (bs + gap);
+        return Rect(x, rVP_.y + 8 * S + rw * (bs + gap), bs, bs);
+    };
+    const Col back(0.04f, 0.03f, 0.1f, 0.55f);
     const Icon ic[3] = {Icon::Move, Icon::Rotate, Icon::Scale};
     for (int i = 0; i < 3; i++) {
-        Rect r(x, y + i * (bs + gap), bs, bs);
-        g.rect(r, Col(0.04f, 0.03f, 0.1f, 0.55f), 8 * S);
+        Rect r = slot(true, i);
+        g.rect(r, back, 10 * S);
         if (ui.iconBtn(r, ic[i], gizmoMode_ == i, nullptr, gizmoMode_ == i)) gizmoMode_ = i;
     }
-    Rect sr(x, y + 3 * (bs + gap), bs, bs);
-    g.rect(sr, Col(0.04f, 0.03f, 0.1f, 0.55f), 8 * S);
-    if (ui.iconBtn(sr, Icon::Snap, snap_, nullptr, snap_)) snap_ = !snap_;
-
-    x = rVP_.r() - 8 * S - bs;
+    {
+        Rect sr = slot(true, 3);
+        g.rect(sr, back, 10 * S);
+        if (ui.iconBtn(sr, Icon::Snap, snap_, nullptr, snap_)) snap_ = !snap_;
+    }
     int k = 0;
     auto side = [&](Icon icn, bool act, const Col* tint = nullptr) {
-        Rect r(x, y + k * (bs + gap), bs, bs);
-        g.rect(r, Col(0.04f, 0.03f, 0.1f, 0.55f), 8 * S);
-        k++;
+        Rect r = slot(false, k++);
+        g.rect(r, back, 10 * S);
         return ui.iconBtn(r, icn, act, tint, act);
     };
-    Col accentCol = theme::accent2;
-    if (side(Icon::Plus, false, &accentCol)) openAddMenu();
     if (side(Icon::Camera, camView_)) camView_ = !camView_;
-    if (side(Icon::Bone, showBones_)) showBones_ = !showBones_;
-    if (side(Icon::Eye, false)) { focusSelected(); }
+    if (side(Icon::Rig, showBones_ || tab_ == Tab::Bones)) {
+        showBones_ = !showBones_;
+        if (!showBones_ && tab_ == Tab::Bones) tab_ = Tab::None;
+    }
+    if (side(Icon::Eye, false)) focusSelected();
     const Object* sel = scene.find(scene.selected);
     if (sel && sel->type == ObjType::Camera) {
-        Rect r(x - 128 * S, y + k * (bs + gap), 128 * S + bs, bs);
-        if (ui.button(r, "Камера = вид", 0, 12)) alignCameraToView();
-        k++;
+        float w = 150 * S;
+        Rect r(rVP_.r() - 8 * S - w, rVP_.b() - 100 * S, w, 40 * S);
+        if (ui.button(r, "Камера = вид", 0, 12.5f)) alignCameraToView();
         if (sel->id != scene.activeCamera) {
-            Rect r2(x - 128 * S, y + k * (bs + gap), 128 * S + bs, bs);
-            if (ui.button(r2, "Сделать активной", 1, 12)) { scene.pushUndo(); scene.activeCamera = sel->id; }
+            Rect r2(r.x, r.y + 46 * S, w, 40 * S);
+            if (ui.button(r2, "Сделать активной", 1, 12.5f)) { scene.pushUndo(); scene.activeCamera = sel->id; }
         }
     }
     // подпись внизу
@@ -289,9 +408,9 @@ void App::drawViewportOverlay() {
     if (camView_) cap = "Вид из камеры · тяните: поворот, щипок: приближение";
     else if (sel) cap = sel->name;
     if (!cap.empty()) {
-        float fs = 12.5f * S, w = std::min(rVP_.w - 16 * S, g.textWidth(cap, fs) + 20 * S);
-        Rect r(rVP_.x + 8 * S, rVP_.b() - 34 * S, w, 26 * S);
-        g.rect(r, Col(0.04f, 0.03f, 0.1f, 0.6f), 13 * S);
+        float fs = 13 * S, w = std::min(rVP_.w - 16 * S, g.textWidth(cap, fs) + 24 * S);
+        Rect r(rVP_.x + 8 * S, rVP_.b() - 36 * S, w, 28 * S);
+        g.rect(r, Col(0.04f, 0.03f, 0.1f, 0.6f), 14 * S);
         g.textIn(r, g.fit(cap, fs, w - 14 * S), fs, theme::text, 1);
     }
 }
@@ -301,55 +420,63 @@ void App::drawTimeline() {
     Gfx& g = ui.g;
     float S = ui.S;
     g.rect(rTL_, theme::panel, 0);
-    g.rect(Rect(0, rTL_.y, rTL_.w, 1), theme::line, 0);
-    float pad = 8 * S, bs = 34 * S, y = rTL_.y + 6 * S, x = pad;
+    g.rect(Rect(rTL_.x, rTL_.y, rTL_.w, 1), theme::line, 0);
+    float pad = 8 * S, bs = 38 * S, y = rTL_.y + 6 * S, x = rTL_.x + pad;
+    bool wide = rTL_.w > 470 * S;
     int cf = curFrame();
     int a = scene.proj.frameStart, b = scene.proj.frameEnd;
-    if (ui.iconBtn(Rect(x, y, bs, bs), Icon::ToStart, false, nullptr, false)) { playing_ = false; gotoFrame(a); }
-    x += bs + 2 * S;
+    if (wide) {
+        if (ui.iconBtn(Rect(x, y, bs, bs), Icon::ToStart, false, nullptr, false)) { playing_ = false; gotoFrame(a); }
+        x += bs + 2 * S;
+    }
     if (ui.iconBtn(Rect(x, y, bs, bs), Icon::Prev, false, nullptr, false)) { playing_ = false; gotoFrame(cf - 1); }
     x += bs + 2 * S;
-    if (ui.iconBtn(Rect(x, y, bs + 6 * S, bs), playing_ ? Icon::Pause : Icon::Play, true, nullptr, true)) {
+    if (ui.iconBtn(Rect(x, y, bs + 8 * S, bs), playing_ ? Icon::Pause : Icon::Play, true, nullptr, true)) {
         playing_ = !playing_;
         if (playing_ && cf >= b) gotoFrame(a);
         lastSimFrame_ = curFrame();
     }
-    x += bs + 8 * S;
+    x += bs + 10 * S;
     if (ui.iconBtn(Rect(x, y, bs, bs), Icon::Next, false, nullptr, false)) { playing_ = false; gotoFrame(cf + 1); }
     x += bs + 2 * S;
-    if (ui.iconBtn(Rect(x, y, bs, bs), Icon::ToEnd, false, nullptr, false)) { playing_ = false; gotoFrame(b); }
-    x += bs + 6 * S;
+    if (wide) {
+        if (ui.iconBtn(Rect(x, y, bs, bs), Icon::ToEnd, false, nullptr, false)) { playing_ = false; gotoFrame(b); }
+        x += bs + 6 * S;
+    }
     char buf[48];
     std::snprintf(buf, sizeof buf, "%d / %d", cf, b);
-    float fsz = 12.5f * S;
-    g.text(buf, x, y + bs * 0.5f + fsz * 0.36f, fsz, theme::text);
+    float fsz = 13 * S;
+    g.text(buf, x + 2 * S, y + bs * 0.5f + fsz * 0.36f, fsz, theme::text);
 
     // ключи справа
     float rx = rTL_.r() - pad;
-    Rect autoR(rx - 50 * S, y, 50 * S, bs);
+    Rect autoR(rx - 56 * S, y, 56 * S, bs);
     if (ui.button(autoR, "Авто", scene.autoKey ? 1 : 0, 12.5f)) scene.autoKey = !scene.autoKey;
     Rect delR(autoR.x - bs - 4 * S, y, bs, bs), addR(delR.x - bs - 4 * S, y, bs, bs);
     Object* sel = scene.find(scene.selected);
+    bool boneMode = tab_ == Tab::Bones && selBone_ >= 0 && sel && sel->type == ObjType::Model;
     if (ui.iconBtn(addR, Icon::KeyAdd, false, nullptr, true) && sel) {
         beginEdit();
-        if (!scene.insertKey(sel->id, cf)) toast("Объект прицеплен: его положение задаётся относительно родителя");
+        if (boneMode) boneKeyNow();
+        else if (!scene.insertKey(sel->id, cf)) toast("Объект прицеплен: его положение задаётся относительно родителя");
         editStarted_ = false;
     }
     if (ui.iconBtn(delR, Icon::Trash, false, nullptr, true) && sel) {
         beginEdit();
-        if (!scene.deleteKey(sel->id, cf)) toast("На этом кадре нет ключа");
+        bool ok = boneMode ? scene.deleteBoneKey(sel->id, selBone_, cf) : scene.deleteKey(sel->id, cf);
+        if (!ok) toast("На этом кадре нет ключа");
         editStarted_ = false;
     }
 
     // линейка и ключи
-    Rect track(pad + 6 * S, rTL_.y + 50 * S, rTL_.w - 2 * pad - 12 * S, 56 * S);
-    g.rect(track, theme::widget, 8 * S);
+    Rect track(rTL_.x + pad + 6 * S, rTL_.y + 52 * S, rTL_.w - 2 * pad - 12 * S, std::max(40.f * S, rTL_.h - 60 * S));
+    g.rect(track, theme::widget, 10 * S);
     float span = std::max(1, b - a);
-    auto fx = [&](float f) { return track.x + 10 * S + (f - a) / span * (track.w - 20 * S); };
-    float pxPer = (track.w - 20 * S) / span;
+    auto fx = [&](float f) { return track.x + 12 * S + (f - a) / span * (track.w - 24 * S); };
+    float pxPer = (track.w - 24 * S) / span;
     int steps[] = {1, 2, 5, 10, 20, 25, 50, 100, 200, 500, 1000};
     int step = 1000;
-    for (int s : steps) if (pxPer * s >= 30 * S) { step = s; break; }
+    for (int s : steps) if (pxPer * s >= 34 * S) { step = s; break; }
     for (int f = a; f <= b; f++) {
         bool major = ((f - a) % step) == 0;
         if (!major && pxPer < 6 * S) continue;
@@ -357,26 +484,41 @@ void App::drawTimeline() {
         g.rect(Rect(xx - 0.5f * S, track.y + (major ? 4 : 10) * S, 1.f * S, (major ? 12 : 6) * S), theme::textDim.alpha(major ? 0.7f : 0.35f), 0);
         if (major) {
             std::string t = std::to_string(f);
-            g.textIn(Rect(xx - 20 * S, track.y + 16 * S, 40 * S, 14 * S), t, 10.5f * S, theme::textDim, 1);
+            g.textIn(Rect(xx - 20 * S, track.y + 17 * S, 40 * S, 14 * S), t, 10.5f * S, theme::textDim, 1);
         }
     }
+    float ky = track.y + track.h * 0.64f, ks = 8.f * S;
+    Rect barR, handleL, handleR;
+    bool haveBar = false;
     if (sel) {
-        float ky = track.y + track.h * 0.76f, ks = 7.5f * S;
-        for (auto& k : sel->keys) {
-            float xx = fx((float)k.frame);
-            Col c = k.frame == cf ? Col(1, 1, 1, 1) : theme::keyCol;
-            g.tri(xx, ky - ks, xx + ks, ky, xx, ky + ks, c); g.tri(xx, ky - ks, xx, ky + ks, xx - ks, ky, c);
+        auto diamond = [&](float xx, float yy, const Col& c) {
+            g.tri(xx, yy - ks, xx + ks, yy, xx, yy + ks, c);
+            g.tri(xx, yy - ks, xx, yy + ks, xx - ks, yy, c);
+        };
+        if (boneMode) {
+            for (auto& tr : sel->boneTracks)
+                if (tr.node == selBone_)
+                    for (auto& k : tr.keys) diamond(fx((float)k.frame), ky, k.frame == cf ? Col(1, 1, 1, 1) : Col(0.3f, 0.9f, 1.f, 1.f));
+            for (auto& k : sel->keys) diamond(fx((float)k.frame), track.y + track.h * 0.88f, theme::keyCol.alpha(0.35f));
+        } else {
+            for (auto& k : sel->keys) diamond(fx((float)k.frame), ky, k.frame == cf ? Col(1, 1, 1, 1) : theme::keyCol);
         }
         for (auto& k : sel->parents) {
             float xx = fx((float)k.frame);
             Col c = k.parent >= 0 ? theme::accent2 : Col(1, 0.5f, 0.3f, 1);
-            g.rect(Rect(xx - 3 * S, track.y + 33 * S, 6 * S, 6 * S), c, 3 * S);
+            g.rect(Rect(xx - 3.5f * S, track.y + 34 * S, 7 * S, 7 * S), c, 3.5f * S);
         }
         for (auto& k : sel->clipKeys) { float xx = fx((float)k.frame); g.rect(Rect(xx - 3 * S, track.y + 4 * S, 6 * S, 4 * S), theme::ok, 1 * S); }
         for (auto& k : sel->visKeys) { float xx = fx((float)k.frame); g.rect(Rect(xx - 3 * S, track.y + 4 * S, 6 * S, 4 * S), k.visible ? Col(1, 1, 1, 1) : theme::danger, 1 * S); }
         if (sel->type == ObjType::Effect) {
             float x0 = fx((float)sel->fxStart), x1 = fx((float)sel->fxEnd);
-            g.rect(Rect(x0, track.b() - 8 * S, std::max(2.f, x1 - x0), 4 * S), theme::orange.alpha(0.8f), 2 * S);
+            barR = Rect(x0, track.b() - 18 * S, std::max(10.f * S, x1 - x0), 12 * S);
+            handleL = Rect(x0 - 16 * S, barR.y - 8 * S, 32 * S, barR.h + 16 * S);
+            handleR = Rect(barR.r() - 16 * S, barR.y - 8 * S, 32 * S, barR.h + 16 * S);
+            haveBar = true;
+            g.rect(barR, theme::orange.alpha(0.85f), 5 * S);
+            g.rect(Rect(barR.x, barR.y, 4 * S, barR.h), Col(1, 1, 1, 0.9f), 2 * S);
+            g.rect(Rect(barR.r() - 4 * S, barR.y, 4 * S, barR.h), Col(1, 1, 1, 0.9f), 2 * S);
         }
     }
     float px = fx((float)cf);
@@ -387,38 +529,106 @@ void App::drawTimeline() {
     bool drag = ui.pointerDown() && ui.pressedId(tlId_) && !ui.blocked;
     if (drag || ui.tapOn(tlId_, track)) {
         ui.takeOwner(tlId_);
-        float t = (ui.px() - (track.x + 10 * S)) / std::max(1.f, track.w - 20 * S);
+        float t = (ui.px() - (track.x + 12 * S)) / std::max(1.f, track.w - 24 * S);
         int f = a + (int)std::lround(clampf(t, 0.f, 1.f) * span);
         if (f != cf) { playing_ = false; gotoFrame(f); }
     }
+    // полоса эффекта: тянуть за края - длительность, за середину - сдвиг по времени
+    if (haveBar && sel) {
+        static float acc = 0;
+        uint32_t idM = ui.zone(barR.inset(0, -6 * S)), idL = ui.zone(handleL), idR = ui.zone(handleR);
+        if (ui.pressedNow()) acc = 0;
+        auto frameAt = [&](float xx) { return a + (int)std::lround(clampf((xx - (track.x + 12 * S)) / std::max(1.f, track.w - 24 * S), 0.f, 1.f) * span); };
+        int id = sel->id;
+        bool changed = false;
+        if (!ui.blocked && ui.pointerDown()) {
+            if (ui.pressedId(idL) && ui.moved()) {
+                ui.takeOwner(idL); beginEdit();
+                sel->fxStart = std::min(frameAt(ui.px()), sel->fxEnd - 1); changed = true;
+            } else if (ui.pressedId(idR) && ui.moved()) {
+                ui.takeOwner(idR); beginEdit();
+                sel->fxEnd = std::max(frameAt(ui.px()), sel->fxStart + 1); changed = true;
+            } else if (ui.pressedId(idM) && ui.moved()) {
+                ui.takeOwner(idM); beginEdit();
+                acc += ui.dragDx() / std::max(0.1f, pxPer);
+                int d = (int)std::lround(acc);
+                if (d != 0) { acc -= d; sel->fxStart += d; sel->fxEnd += d; if (sel->fxStart < 0) { sel->fxEnd -= sel->fxStart; sel->fxStart = 0; } changed = true; }
+            }
+        }
+        if (changed) { (void)id; scene.resetEffects(); scene.simulateTo(curFrame()); }
+    }
 }
 
-// ============================================================ вкладки
+// ============================================================ нижняя панель инструментов
 void App::drawTabs() {
     Gfx& g = ui.g;
+    float S = ui.S;
     g.rect(rTab_, theme::panel, 0);
-    g.rect(Rect(0, rTab_.y, rTab_.w, 1), theme::line, 0);
-    struct T { Tab t; Icon i; const char* n; } tabs[4] = {
-        {Tab::Scene, Icon::Cube, "Сцена"}, {Tab::Object, Icon::Move, "Объект"}, {Tab::Anim, Icon::Film, "Анимация"}, {Tab::Render, Icon::Image, "Рендер"}};
-    float w = rTab_.w / 4;
-    for (int i = 0; i < 4; i++) {
-        Rect r(i * w, rTab_.y + 2 * ui.S, w, rTab_.h - 4 * ui.S);
-        if (ui.iconLabelBtn(r, tabs[i].i, tabs[i].n, tab_ == tabs[i].t, 12)) tab_ = (tab_ == tabs[i].t) ? Tab::None : tabs[i].t;
+    if (land_) g.rect(Rect(rTab_.x, rTab_.y, 1, rTab_.h), theme::line, 0);
+    else g.rect(Rect(0, rTab_.y, rTab_.w, 1), theme::line, 0);
+    struct T { Tab t; Icon i; const char* n; };
+    static const T tabs[] = {
+        {Tab::None, Icon::Plus, "Добавить"}, {Tab::Scene, Icon::Layers, "Сцена"}, {Tab::Object, Icon::Move, "Объект"},
+        {Tab::Bones, Icon::Rig, "Кости"},    {Tab::Physics, Icon::Ball, "Физика"}, {Tab::Fx, Icon::Flame, "Эффекты"},
+        {Tab::Anim, Icon::Film, "Анимация"}, {Tab::Render, Icon::Palette, "Рендер"}};
+    const int N = 8;
+    float iw = land_ ? rTab_.w : std::max(80 * S, rTab_.w / N), ih = land_ ? 74 * S : rTab_.h;
+    float total = land_ ? ih * N : iw * N;
+    ScrollState& sc = scrollBar_;
+    ui.zone(rTab_);
+    ui.beginScroll(rTab_, sc, total, !land_);
+    for (int i = 0; i < N; i++) {
+        Rect r = land_ ? Rect(rTab_.x, rTab_.y + i * ih - sc.off, iw, ih) : Rect(rTab_.x + i * iw - sc.off, rTab_.y, iw, ih);
+        bool act = tabs[i].t != Tab::None && tab_ == tabs[i].t;
+        if (i == 0) {
+            Rect b = r.inset(8 * S, 10 * S);
+            if (ui.button(b, "", 1, 12)) openAddMenu();
+            g.icon(Icon::Plus, Rect(b.cx() - 13 * S, b.y + 6 * S, 26 * S, 26 * S), Col(1, 1, 1, 1));
+            g.textIn(Rect(b.x, b.y + b.h * 0.62f, b.w, b.h * 0.3f), "Добавить", 11.5f * S, Col(1, 1, 1, 1), 1);
+            continue;
+        }
+        if (ui.iconLabelBtn(r, tabs[i].i, tabs[i].n, act, 11.5f)) {
+            tab_ = act ? Tab::None : tabs[i].t;
+            if (tab_ == Tab::Bones) showBones_ = true;
+        }
+    }
+    ui.endScroll();
+    contentBar_ = total;
+}
+
+static const char* tabTitle(Tab t) {
+    switch (t) {
+        case Tab::Scene: return "Сцена";
+        case Tab::Object: return "Объект";
+        case Tab::Bones: return "Кости";
+        case Tab::Physics: return "Физика";
+        case Tab::Fx: return "Эффекты";
+        case Tab::Anim: return "Анимация";
+        case Tab::Render: return "Рендер и экспорт";
+        default: return "";
     }
 }
 
 void App::drawPanel() {
     if (tab_ == Tab::None) return;
     Gfx& g = ui.g;
+    float S = ui.S;
     g.rect(rPanel_, theme::panel, 0);
-    g.rect(Rect(0, rPanel_.y, rPanel_.w, 1), theme::line, 0);
-    uint32_t z = ui.zone(rPanel_);  // панель перекрывает вьюпорт
-    (void)z;
+    if (land_) g.rect(Rect(rPanel_.x, rPanel_.y, 1, rPanel_.h), theme::line, 0);
+    else g.rect(Rect(0, rPanel_.y, rPanel_.w, 1), theme::line, 0);
+    ui.zone(rPanel_);  // панель перекрывает вьюпорт
+    float hh = 44 * S;
+    g.text(tabTitle(tab_), rPanel_.x + 16 * S, rPanel_.y + hh * 0.5f + 7 * S, 18 * S, theme::text);
+    if (ui.iconBtn(Rect(rPanel_.r() - 44 * S, rPanel_.y + 2 * S, 40 * S, 40 * S), Icon::ChevDown, false, nullptr, false)) { tab_ = Tab::None; return; }
+    Rect content(rPanel_.x, rPanel_.y + hh, rPanel_.w, rPanel_.h - hh);
     switch (tab_) {
-        case Tab::Scene: panelScene(rPanel_); break;
-        case Tab::Object: panelObject(rPanel_); break;
-        case Tab::Anim: panelAnim(rPanel_); break;
-        case Tab::Render: panelRender(rPanel_); break;
+        case Tab::Scene: panelScene(content); break;
+        case Tab::Object: panelObject(content); break;
+        case Tab::Bones: panelBones(content); break;
+        case Tab::Physics: panelPhysics(content); break;
+        case Tab::Fx: panelFx(content); break;
+        case Tab::Anim: panelAnim(content); break;
+        case Tab::Render: panelRender(content); break;
         default: break;
     }
 }
@@ -561,21 +771,10 @@ void App::panelObject(const Rect& r) {
             if (ui.button(cell(b1, 1, 2), o->id == scene.activeCamera ? "Активная ✓" : "Сделать активной", o->id == scene.activeCamera ? 0 : 1, 13)) { scene.pushUndo(); scene.activeCamera = id; }
         } else if (o->type == ObjType::Effect) {
             sectionLabel(std::string("Эффект: ") + kFxNames[(int)o->fx]);
-            propF(*o, "Размер", [](Object& x) -> float& { return x.fxScale; }, 0.1f, 6.f, "%.2f", 0);
-            float st = (float)o->fxStart, en = (float)o->fxEnd;
-            Rect line = row(38);
-            auto applyStart = [this, id](float nv) { Object* ob = scene.find(id); if (!ob) return; beginEdit(); ob->fxStart = std::max(1, (int)std::lround(nv)); scene.resetEffects(); scene.simulateTo(curFrame()); };
-            auto applyEnd = [this, id](float nv) { Object* ob = scene.find(id); if (!ob) return; beginEdit(); ob->fxEnd = std::max(1, (int)std::lround(nv)); scene.resetEffects(); scene.simulateTo(curFrame()); };
-            if (slide(cell(line, 0, 2), "Начало, кадр", st, 0, 0, "%.0f", 0.15f, applyStart)) applyStart(st);
-            if (slide(cell(line, 1, 2), "Конец, кадр", en, 0, 0, "%.0f", 0.15f, applyEnd)) applyEnd(en);
-            if (o->fx == FxKind::Muzzle) {
-                float rate = (float)o->fxRate;
-                Rect l2 = row(38);
-                auto applyRate = [this, id](float nv) { Object* ob = scene.find(id); if (!ob) return; beginEdit(); ob->fxRate = std::max(0, (int)std::lround(nv)); scene.resetEffects(); scene.simulateTo(curFrame()); };
-                if (slide(l2, "Очередь: каждые N кадров (0 = 1 выстрел)", rate, 0, 24, "%.0f", 0.05f, applyRate)) applyRate(rate);
-            }
+            Rect bb = row(44);
+            if (ui.button(bb, "Настройки эффекта…", 1, 14)) tab_ = Tab::Fx;
             Rect hint = row(34);
-            ui.label(hint, "Эффект летит вдоль оси Z объекта. Прицепите его к оружию или руке.", 11, theme::textDim, 0);
+            ui.label(hint, "Эффект можно двигать как обычный объект и прицеплять к оружию, руке или кости.", 11, theme::textDim, 0);
         }
 
         // ----- прицепление -----
@@ -840,6 +1039,11 @@ void App::panelRender(const Rect& r) {
         if (ui.toggle(t, "Тени от солнца", v)) { beginEdit(); rs.shadows = v; editStarted_ = false; }
     }
     sl("Мягкость теней", rs.shadowSoft, 0.f, 3.f, "%.2f");
+    {
+        Rect t = row(38);
+        bool v = rs.contactShadows;
+        if (ui.toggle(t, "Контактные тени (у основания)", v)) { beginEdit(); rs.contactShadows = v; editStarted_ = false; }
+    }
     {
         Rect t = row(38);
         bool v = rs.ao;
@@ -1129,7 +1333,7 @@ void App::drawToast() {
     for (auto& l : lines) w = std::max(w, g.textWidth(l, fs));
     w += 28 * S;
     float h = lines.size() * 19 * S + 18 * S;
-    Rect r((W_ - w) * 0.5f, rTop_.b() + 10 * S, w, h);
+    Rect r((W_ - w) * 0.5f, home_ ? H_ - h - 40 * S : std::max(rTop_.b() + 8 * S, rTL_.y - h - 10 * S), w, h);
     float a = std::min(1.f, toastT_ * 3.f);
     g.rect(r, Col(0.05f, 0.04f, 0.14f, 0.96f * a), 12 * S);
     g.stroke(r, theme::accent.alpha(a), 12 * S, 1.2f * S);

@@ -70,6 +70,7 @@ typedef ptrdiff_t GLintptr;
 #define GL_CLAMP_TO_EDGE 0x812F
 #define GL_RGBA 0x1908
 #define GL_RGBA8 0x8058
+#define GL_RGB8 0x8051
 #define GL_RED 0x1903
 #define GL_R8 0x8229
 #define GL_SRGB8_ALPHA8 0x8C43
@@ -172,6 +173,10 @@ void glActiveTexture(GLenum unit);
 void glTexImage2D(GLenum target, GLint level, GLint ifmt, GLsizei w, GLsizei h, GLint border, GLenum fmt,
                   GLenum type, const void* data);
 void glGenerateMipmap(GLenum target);
+void glGenSamplers(GLsizei n, GLuint* samplers);
+void glDeleteSamplers(GLsizei n, const GLuint* samplers);
+void glBindSampler(GLuint unit, GLuint sampler);
+void glSamplerParameteri(GLuint sampler, GLenum pname, GLint param);
 void glTexParameteri(GLenum target, GLenum pname, GLint param);
 void glDeleteTextures(GLsizei n, const GLuint* t);
 

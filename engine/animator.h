@@ -11,8 +11,16 @@ struct Pose {
     std::vector<Quat> r;
 };
 
+// Поправка позы кости (в пространстве родителя): вращение домножается слева, смещение прибавляется.
+struct BoneDelta {
+    int node = 0;
+    Vec3 t;
+    Quat r;
+};
+
 class Animator {
 public:
+    std::vector<BoneDelta> deltas;  // применяются после клипа, до расчёта матриц
     void setModel(const Model* m);
     // Переключиться на клип с плавным переходом (blend секунд).
     void play(int clip, float blend = 0.25f);

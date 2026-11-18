@@ -25,7 +25,7 @@ struct Platform {
     std::function<void(const std::string&)> toast;
 };
 
-enum class Tab { None, Scene, Object, Anim, Render };
+enum class Tab { None, Scene, Object, Bones, Physics, Fx, Anim, Render };
 
 struct Modal {
     enum Kind { None, Keypad, Text, List, Confirm, Info, Progress } kind = None;
@@ -59,13 +59,25 @@ public:
     bool importModelData(const std::string& displayName, const uint8_t* d, size_t n, const FileReader& rd, std::string* err);
     bool importModelPath(const std::string& path, std::string* err = nullptr);
     void loadAutosave();
-    bool saveProjectAs(const std::string& name);
+    bool saveProjectAs(const std::string& name, bool quiet = false);
     bool openProject(const std::string& name);
     void newProject();
     void toast(const std::string& s);
 
     // для тестов
     void setTab(Tab t) { tab_ = t; }
+    void startEditor() { home_ = false; }
+    bool atHome() const { return home_; }
+    bool landscape() const { return land_; }
+    int selectedBone() const { return selBone_; }
+    void selectBone(int n) { selBone_ = n; }
+    void enableBones(bool b) { showBones_ = b; }
+    Rect toolbarRect() const { return rTab_; }
+    void goHome();
+    void addItem(int i);
+    void focusSel() { focusSelected(); }
+    void setCamView(bool b) { camView_ = b; }
+    bool boneXY(int node, float& x, float& y) const { const Object* o = scene.find(scene.selected); return o && boneScreenPos(*o, node, x, y); }
     void setFrame(int f);
     Tab tab() const { return tab_; }
     void openAddMenu();
@@ -91,7 +103,24 @@ private:
     Rect cameraViewRect() const;
 
     // ---- интерфейс ----
+    void drawHome();
+    void refreshHome();
+    void freeThumbs();
+    void makeThumb(const std::string& name);
+    void deleteProject(const std::string& name);
+    void duplicateProject(const std::string& name);
+    void renameProject(const std::string& from, const std::string& to);
     void drawTopBar();
+    void drawBoneOverlay();
+    bool boneAtScreen(float x, float y, int& node) const;
+    bool boneScreenPos(const Object& o, int node, float& sx, float& sy) const;
+    void boneDrag(float dx, float dy);
+    void boneKeyNow();
+    void panelBones(const Rect& r);
+    void panelPhysics(const Rect& r);
+    void panelFx(const Rect& r);
+    void addFxMenu();
+    void propSim(Object& o, const std::string& label, std::function<float&(Object&)> ref, float lo, float hi, const char* fmt, float perDp);
     void drawViewportOverlay();
     void drawTimeline();
     void drawTabs();
@@ -156,8 +185,26 @@ private:
     float dt_ = 1.f / 60;
     Rect rTop_, rVP_, rTL_, rPanel_, rTab_;
     Tab tab_ = Tab::None;
-    ScrollState scrollScene_, scrollObj_, scrollAnim_, scrollRender_;
-    float contentScene_ = 0, contentObj_ = 0, contentAnim_ = 0, contentRender_ = 0;
+    ScrollState scrollScene_, scrollObj_, scrollAnim_, scrollRender_, scrollBones_, scrollPhys_, scrollFx_, scrollBar_, scrollHome_;
+    float contentScene_ = 0, contentObj_ = 0, contentAnim_ = 0, contentRender_ = 0, contentBones_ = 0, contentPhys_ = 0, contentFx_ = 0, contentBar_ = 0, contentHome_ = 0;
+    bool land_ = false;
+
+    // стартовый экран
+    bool home_ = true;
+    struct ProjInfo {
+        std::string name;
+        long long mtime = 0, size = 0;
+        GLuint tex = 0;
+        bool thumbTried = false;
+    };
+    std::vector<ProjInfo> homeList_;
+    bool homeDirty_ = true;
+    std::string thumbPending_;
+    bool hasAutosave_ = false;
+
+    // кости
+    int selBone_ = -1;
+    bool boneDrag_ = false;
     Form form_;
 
     // события касаний
@@ -185,7 +232,7 @@ private:
     double lastAutosave_ = 0;
 
     // жесты
-    enum class Gest { None, Armed, Orbit, Pinch, Gizmo, Timeline } gest_ = Gest::None;
+    enum class Gest { None, Armed, Orbit, Pinch, Gizmo, Timeline, Bone } gest_ = Gest::None;
     uint32_t vpId_ = 0, tlId_ = 0;
     int gizmoMode_ = 0;
     bool snap_ = false;

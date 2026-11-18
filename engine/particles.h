@@ -7,7 +7,7 @@
 
 namespace eng {
 
-enum PType { P_FIRE = 0, P_SMOKE = 1, P_FLASH = 2, P_SPARK = 3, P_DUST = 4 };
+enum PType { P_FIRE = 0, P_SMOKE = 1, P_FLASH = 2, P_SPARK = 3, P_DUST = 4, P_BLOOD = 5 };
 
 struct Particle {
     Vec3 pos, vel;
@@ -47,8 +47,14 @@ public:
     void render(const Mat4& vp, Vec3 camRight, Vec3 camUp, Vec3 camPos);
 
     // готовые эффекты
-    void muzzleFlash(Vec3 pos, Vec3 dir, float scale = 1.f);
-    void explosion(Vec3 pos, float scale = 1.f);
+    // variant: 0 пистолет, 1 дробовик, 2 автомат; power - яркость и сила
+    void muzzleFlash(Vec3 pos, Vec3 dir, float scale = 1.f, int variant = 0, float power = 1.f);
+    // power - сила взрыва: больше огня, дыма, осколков и дальше разлёт
+    void explosion(Vec3 pos, float scale = 1.f, float power = 1.f);
+    // кровь: брызги (один раз) и течение (каждый шаг); капли падают и оставляют пятна на земле
+    void bloodBurst(Vec3 pos, Vec3 dir, float scale, float power);
+    void bloodFlow(Vec3 pos, Vec3 dir, float scale, float power, float dt, float* acc);
+    int splatCount() const { return (int)splats_.size(); }
     void impact(Vec3 pos, Vec3 normal, float speed, bool dust);
     void smokePuff(Vec3 pos, float size, float life);
     void trail(Vec3 pos, Vec3 vel);
@@ -70,6 +76,11 @@ private:
     void add(const Particle& p) { if (ps_.size() < 4000) ps_.push_back(p); }
     void addLight(Vec3 pos, Vec3 color, float radius, float life, float intensity);
 
+    struct Splat { float x, z, r, seed; };
+    std::vector<Splat> splats_;
+    GLuint splatProg_ = 0, splatVao_ = 0, splatBuf_ = 0;
+    GLint sVP_ = -1, sLight_ = -1, sOut_ = -1, sY_ = -1;
+    void drawSplats(const Mat4& vp);
     std::vector<Particle> ps_;
     std::vector<Emitter> emitters_;
     std::vector<PointLight> lights_;

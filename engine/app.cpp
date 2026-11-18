@@ -167,7 +167,7 @@ static std::string sanitizeName(const std::string& s) {
     return o.empty() ? "Project" : o;
 }
 
-bool App::saveProjectAs(const std::string& nameIn) {
+bool App::saveProjectAs(const std::string& nameIn, bool quiet) {
     std::string name = sanitizeName(nameIn);
     mkdir(plat.dataDir.c_str(), 0755);
     mkdir(projectsDir().c_str(), 0755);
@@ -177,7 +177,8 @@ bool App::saveProjectAs(const std::string& nameIn) {
     scene.name = name;
     std::string s = scene.saveProject();
     f.write(s.data(), (std::streamsize)s.size());
-    toast("Проект «" + name + "» сохранён");
+    if (!quiet) { toast("Проект «" + name + "» сохранён"); thumbPending_ = name; }
+    homeDirty_ = true;
     return true;
 }
 
@@ -190,20 +191,39 @@ bool App::openProject(const std::string& name) {
     scene.name = name;
     uploadPending();
     playing_ = false;
+    selBone_ = -1;
+    tab_ = Tab::None;
+    home_ = false;
     gotoFrame(scene.proj.frameStart);
     scene.resetEffects();
     scene.simulateTo(scene.proj.frameStart);
+    target_ = {0, 0.9f, 0}; yaw_ = 0.55f; pitch_ = 0.32f; dist_ = 7.5f;
     toast("Открыт проект «" + name + "»");
     return true;
 }
 
 void App::newProject() {
+    if (!plat.dataDir.empty() && !home_ && !scene.name.empty() && scene.name != "Untitled") saveProjectAs(scene.name, true);
     for (auto& m : scene.models) if (m.model) m.model->release();
     scene.clear();
     playing_ = false;
+    selBone_ = -1;
+    tab_ = Tab::None;
     frameF_ = 1.0;
     scene.evaluate(1.f);
     target_ = {0, 0.9f, 0}; yaw_ = 0.55f; pitch_ = 0.32f; dist_ = 7.5f;
+    home_ = false;
+    if (!plat.dataDir.empty()) {
+        std::string nn;
+        for (int i = 1; i < 1000; i++) {
+            nn = "Проект " + std::to_string(i);
+            struct stat st;
+            if (stat((projectsDir() + "/" + nn + ".prismlab").c_str(), &st) != 0) break;
+        }
+        scene.name = nn;
+        saveProjectAs(nn, true);
+        thumbPending_ = nn;
+    }
 }
 
 void App::loadAutosave() {
@@ -220,6 +240,7 @@ void App::loadAutosave() {
 
 void App::onPause() {
     if (plat.dataDir.empty() || !gl_) return;
+    if (!home_ && autoSaveDirty_ && !scene.name.empty() && scene.name != "Untitled") { saveProjectAs(scene.name, true); autoSaveDirty_ = false; }
     mkdir(plat.dataDir.c_str(), 0755);
     std::ofstream f(plat.dataDir + "/autosave.prismlab", std::ios::binary);
     if (f) { std::string s = scene.saveProject(); f.write(s.data(), (std::streamsize)s.size()); }
@@ -260,21 +281,42 @@ bool App::onBack() {
         if (exp_.kind == Export::None) modal_ = Modal();
         return true;
     }
+    if (home_) return false;
     if (tab_ != Tab::None) { tab_ = Tab::None; return true; }
     if (camView_) { camView_ = false; return true; }
-    return false;
+    goHome();
+    return true;
 }
 
 // ============================================================ раскладка
 void App::layout() {
     float S = ui.S;
-    float topH = 52 * S, tabH = 60 * S, tlH = 112 * S;
-    float panelH = tab_ == Tab::None ? 0.f : std::min(H_ * 0.40f, 340.f * S);
+    land_ = W_ > H_ * 1.15f;
+    if (home_) {
+        rTop_ = Rect(0, 0, (float)W_, 0);
+        rVP_ = Rect(0, 0, (float)W_, (float)H_);
+        rTab_ = rTL_ = rPanel_ = Rect();
+        return;
+    }
+    float topH = (land_ ? 52 : 58) * S;
     rTop_ = Rect(0, 0, (float)W_, topH);
-    rTab_ = Rect(0, H_ - tabH, (float)W_, tabH);
-    rTL_ = Rect(0, rTab_.y - tlH, (float)W_, tlH);
-    rPanel_ = Rect(0, rTL_.y - panelH, (float)W_, panelH);
-    rVP_ = Rect(0, topH, (float)W_, rPanel_.y - topH);
+    bool open = tab_ != Tab::None;
+    if (!land_) {
+        float barH = 78 * S, tlH = (open ? 116 : 132) * S;
+        float panelH = open ? std::min(H_ * 0.36f, 330.f * S) : 0.f;
+        rTab_ = Rect(0, H_ - barH, (float)W_, barH);
+        rTL_ = Rect(0, rTab_.y - tlH, (float)W_, tlH);
+        rPanel_ = Rect(0, rTL_.y - panelH, (float)W_, panelH);
+        rVP_ = Rect(0, topH, (float)W_, rPanel_.y - topH);
+    } else {
+        float barW = 88 * S, tlH = 112 * S;
+        float panelW = open ? std::min(W_ * 0.42f, 380.f * S) : 0.f;
+        rTab_ = Rect(W_ - barW, topH, barW, H_ - topH);
+        rPanel_ = Rect(rTab_.x - panelW, topH, panelW, H_ - topH);
+        float mainW = rPanel_.x;
+        rTL_ = Rect(0, H_ - tlH, mainW, tlH);
+        rVP_ = Rect(0, topH, mainW, rTL_.y - topH);
+    }
 }
 
 Rect App::cameraViewRect() const {
@@ -301,11 +343,11 @@ void App::renderViewport() {
     if (cam) {
         viewRect_ = cameraViewRect();
         view_ = Renderer::cameraView(*cam, viewRect_.w / viewRect_.h);
-        ov.grid = false; ov.icons = false; ov.selection = true; ov.bones = showBones_;
+        ov.grid = false; ov.icons = false; ov.selection = true; ov.bones = false;
     } else {
         viewRect_ = rVP_;
         view_ = currentView(viewRect_.w / viewRect_.h);
-        ov.grid = true; ov.icons = true; ov.selection = true; ov.bones = showBones_;
+        ov.grid = true; ov.icons = true; ov.selection = true; ov.bones = false;
     }
     eye_ = view_.eye;
     renderer.setPixelScale(ui.S * 0.8f * viewScale_);
@@ -371,7 +413,24 @@ void App::frame(double now) {
 
     uploadPending();
     ui.S = density_;
+    if (!thumbPending_.empty()) { std::string n = thumbPending_; thumbPending_.clear(); if (!home_ || true) makeThumb(n); }
     layout();
+    if (home_) {
+        glBindFramebuffer(GL_FRAMEBUFFER, targetFbo_);
+        glViewport(0, 0, W_, H_);
+        glDisable(GL_SCISSOR_TEST);
+        glClearColor(theme::bg.r, theme::bg.g, theme::bg.b, 1);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        ui.begin(W_, H_, density_, primary_, dt_);
+        ui.blocked = modal_.kind != Modal::None;
+        drawHome();
+        ui.blocked = false;
+        glViewport(0, 0, W_, H_);
+        drawModal();
+        drawToast();
+        ui.end();
+        return;
+    }
     advancePlayback(dt_);
     if (!playing_ && exp_.kind == Export::None && scene.frame() != (float)(int)std::lround(frameF_)) scene.evaluate((float)(int)std::lround(frameF_));
 
@@ -461,6 +520,13 @@ void App::alignCameraToView() {
 }
 
 void App::pickAt(float x, float y) {
+    {
+        const Object* so = scene.find(scene.selected);
+        if (!camView_ && so && so->type == ObjType::Model && (showBones_ || tab_ == Tab::Bones)) {
+            int node;
+            if (boneAtScreen(x, y, node)) { selBone_ = node; return; }
+        }
+    }
     Vec3 ro, rd;
     rayFromScreen(x, y, ro, rd);
     float mt = 1e30f;
@@ -476,6 +542,7 @@ void App::pickAt(float x, float y) {
         if (d < bestD) { bestD = d; best = o.id; }
     }
     int sel = best >= 0 ? best : mid;
+    if (sel != scene.selected) selBone_ = -1;
     scene.selected = sel;
     if (sel >= 0 && tab_ == Tab::None) {}
 }
@@ -693,11 +760,22 @@ void App::viewportGestures() {
     const Ptr* second = nullptr;
     for (auto& p : ptrs_) if (p.id != primaryId_) { second = &p; break; }
     if (ui.pressedNow() && ui.candidate() == vpId_ && rVP_.has(ui.downX(), ui.downY())) {
-        int h = gizmoHit(ui.downX(), ui.downY());
-        if (h >= 0) { gest_ = Gest::Gizmo; gizmoActive_ = h; ui.claimPointer(); }
+        bool boneGrab = false;
+        {
+            const Object* so = scene.find(scene.selected);
+            float bx, by;
+            if (!camView_ && selBone_ >= 0 && so && so->type == ObjType::Model && (showBones_ || tab_ == Tab::Bones) && boneScreenPos(*so, selBone_, bx, by) &&
+                std::hypot(bx - ui.downX(), by - ui.downY()) < ui.dp(40))
+                boneGrab = true;
+        }
+        int h = (boneGrab || tab_ == Tab::Bones) ? -1 : gizmoHit(ui.downX(), ui.downY());
+        if (boneGrab) { gest_ = Gest::Bone; ui.claimPointer(); }
+        else if (h >= 0) { gest_ = Gest::Gizmo; gizmoActive_ = h; ui.claimPointer(); }
         else gest_ = Gest::Armed;
     }
-    if (gest_ == Gest::Gizmo) {
+    if (gest_ == Gest::Bone) {
+        if (ui.pointerDown() && ui.moved()) { ui.claimPointer(); boneDrag(ui.dragDx(), ui.dragDy()); }
+    } else if (gest_ == Gest::Gizmo) {
         if (ui.pointerDown()) gizmoDrag(ui.px(), ui.py());
     } else if (gest_ == Gest::Armed || gest_ == Gest::Orbit) {
         if (second && ui.pointerDown()) {
@@ -729,13 +807,14 @@ void App::viewportGestures() {
     }
     if (ui.releasedNow()) {
         if (gest_ == Gest::Armed && !ui.moved()) pickAt(ui.px(), ui.py());
-        if (gest_ == Gest::Gizmo) { scene.simulateTo((int)std::lround(frameF_)); }
+        if (gest_ == Gest::Gizmo || gest_ == Gest::Bone) { scene.simulateTo((int)std::lround(frameF_)); }
+        if (gest_ == Gest::Bone && !ui.moved()) { int nn; if (!boneAtScreen(ui.px(), ui.py(), nn)) pickAt(ui.px(), ui.py()); }
         gest_ = Gest::None;
         gizmoActive_ = -1;
         editStarted_ = false;
     }
     if (!ui.pointerDown() && !ui.releasedNow()) { gest_ = Gest::None; gizmoActive_ = -1; }
-    if (!ui.blocked) drawGizmo();
+    if (!ui.blocked && tab_ != Tab::Bones) drawGizmo();
 }
 
 // ============================================================ экспорт

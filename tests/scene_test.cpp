@@ -139,6 +139,102 @@ int main(int argc, char** argv) {
     CHECK(sc.objects.size() == n, "undo restores %zu", sc.objects.size());
     CHECK(sc.redo() && sc.objects.size() == n - 1, "redo");
 
+
+    // --- кости: поза поверх покоя, ключи, интерполяция, сохранение ---
+    {
+        Scene b;
+        b.proj.frameEnd = 60;
+        auto m = loadFile(assets + "/test_skinned.glb");
+        CHECK(m != nullptr, "skinned glb loads");
+        if (m) {
+            int id = b.addModel(std::move(m), assets + "/test_skinned.glb", "rig");
+            Object* o = b.find(id);
+            auto nodes = b.boneNodes(*o);
+            CHECK(!nodes.empty(), "bones found: %zu", nodes.size());
+            int bone = nodes.back();
+            b.evaluate(1);
+            Vec3 p0 = transformPoint(o->anim->world[bone], {0, 1, 0});
+            Quat q = quatAxisAngle({0, 0, 1}, 1.2f);
+            CHECK(b.setBoneKey(id, bone, 1, {0, 0, 0}, Quat()), "key f1");
+            CHECK(b.setBoneKey(id, bone, 21, {0, 0, 0}, q), "key f21");
+            b.find(id)->boneTracks[0].keys[0].ease = 0;
+            b.evaluate(1);
+            Vec3 pa = transformPoint(o->anim->world[bone], {0, 1, 0});
+            b.evaluate(21);
+            Vec3 pb = transformPoint(o->anim->world[bone], {0, 1, 0});
+            b.evaluate(11);
+            Vec3 pm = transformPoint(o->anim->world[bone], {0, 1, 0});
+            CHECK(near3(p0, pa, 1e-4f), "frame 1 equals rest");
+            printf("bones=%zu moved=%f\n", nodes.size(), length(pb - pa));
+            CHECK(length(pb - pa) > 1e-3f, "bone moved: %f", length(pb - pa));
+            Vec3 t; Quat qq;
+            b.boneDeltaAt(*b.find(id), bone, 11, t, qq);
+            CHECK(std::fabs(dot(qq, slerp(Quat(), q, 0.5f))) > 0.9999f, "mid pose is the slerp half");
+            (void)pm;
+            // сохранение
+            std::string js2 = b.toJson();
+            Scene b2;
+            b2.models.emplace_back();
+            b2.models[0].model = loadFile(assets + "/test_skinned.glb");
+            b2.models[0].source = assets + "/test_skinned.glb";
+            CHECK(b2.fromJson(js2, &err), "bones json: %s", err.c_str());
+            CHECK(!b2.objects.back()->boneTracks.empty() && b2.objects.back()->boneTracks[0].keys.size() == 2, "bone keys round-trip");
+        }
+    }
+
+    // --- физика: падение с выбранного кадра, пол, повторяемость ---
+    {
+        Scene p;
+        p.proj.fps = 24; p.proj.frameStart = 1; p.proj.frameEnd = 120;
+        int bx = p.addPrimitive("cube");
+        p.setLocal(bx, {0, 4, 0}, {0, 0, 0}, {1, 1, 1});
+        Object* o = p.find(bx);
+        o->phys.enabled = true; o->phys.start = 10; o->phys.bounce = 0.2f;
+        p.evaluate(5);
+        float y5 = posOf(p, bx).y;
+        p.evaluate(10);
+        float y10 = posOf(p, bx).y;
+        p.evaluate(20);
+        float y20 = posOf(p, bx).y;
+        p.evaluate(100);
+        float y100 = posOf(p, bx).y;
+        CHECK(std::fabs(y5 - 4) < 1e-3f && std::fabs(y10 - 4) < 1e-3f, "before physics start the object stays: %f %f", y5, y10);
+        CHECK(y20 < 3.5f, "falls after start: %f", y20);
+        CHECK(y100 < 1.2f && y100 > -0.2f, "rests on the floor: %f", y100);
+        p.evaluate(20);
+        CHECK(std::fabs(posOf(p, bx).y - y20) < 1e-4f, "scrub back gives the same frame");
+        // препятствие: стол под кубом
+        int tb = p.addPrimitive("cube");
+        p.setLocal(tb, {0, 1, 0}, {0, 0, 0}, {3, 0.3f, 3});
+        p.find(tb)->phys.enabled = true; p.find(tb)->phys.kind = 1;
+        p.evaluate(100);
+        float yOnTable = posOf(p, bx).y;
+        CHECK(yOnTable > y100 + 0.5f, "lands on the obstacle: table %f floor %f", yOnTable, y100);
+        // взрыв отбрасывает
+        p.find(tb)->phys.enabled = false;
+        int ex = p.addEffect(FxKind::Explosion);
+        p.find(ex)->fxStart = 30; p.find(ex)->fxPower = 3.f;
+        p.setLocal(ex, {-1.2f, 0.3f, 0}, {0, 0, 0}, {1, 1, 1});
+        p.evaluate(100);
+        float xAway = posOf(p, bx).x;
+        CHECK(xAway > 0.8f, "explosion pushes the body away: x=%f", xAway);
+    }
+
+    // --- кровь: капли оставляют пятна, эффект повторяем ---
+    {
+        Scene bl;
+        bl.proj.fps = 24; bl.proj.frameEnd = 100;
+        int e = bl.addEffect(FxKind::Blood);
+        bl.find(e)->fxStart = 5; bl.find(e)->fxVariant = 0;
+        bl.setLocal(e, {0, 1.2f, 0}, {0, 0, 0}, {1, 1, 1});
+        bl.simulateTo(60);
+        int n1 = bl.particles().splatCount();
+        CHECK(n1 > 20, "blood leaves splats on the floor: %d", n1);
+        bl.simulateTo(30);
+        bl.simulateTo(60);
+        CHECK(bl.particles().splatCount() == n1, "blood is deterministic: %d vs %d", bl.particles().splatCount(), n1);
+    }
+
     // --- выбор лучом ---
     sc.evaluate(1);
     int pk = sc.pick({10, 0.5f, 0}, {-1, 0, 0});

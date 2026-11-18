@@ -44,6 +44,7 @@ float sdBox(vec2 p, vec2 b, float r){ vec2 q = abs(p) - b + r; return length(max
 void main(){
   float a = 1.0;
   float mode = v_prm.w;
+  if (mode > 2.5) { vec4 t = texture(u_atlas, v_uv); float al3 = v_col.a; o = vec4(t.rgb * al3, al3); return; }
   if (mode < 0.5) { float d = sdBox(v_uv, v_prm.xy, v_prm.z); a = clamp(0.5 - d, 0.0, 1.0); }
   else if (mode < 1.5) { a = texture(u_atlas, v_uv).r; a = clamp((a - 0.5) * 1.35 + 0.5, 0.0, 1.0); }
   else if (mode < 2.5) { float d = sdBox(v_uv, v_prm.xy, v_prm.z); d = abs(d + v_sw * 0.5) - v_sw * 0.5; a = clamp(0.5 - d, 0.0, 1.0); }
@@ -112,7 +113,7 @@ void Gfx::release() {
 void Gfx::begin(int w, int h) {
     w_ = w; h_ = h;
     v_.clear(); runs_.clear(); clips_.clear();
-    runs_.push_back({0, Rect(), false});
+    runs_.push_back({0, Rect(), false, 0});
 }
 
 void Gfx::end() {
@@ -140,6 +141,7 @@ void Gfx::end() {
             glEnable(GL_SCISSOR_TEST);
             glScissor((GLint)std::floor(c.x), (GLint)std::floor(h_ - c.b()), (GLsizei)std::ceil(c.w) + 1, (GLsizei)std::ceil(c.h) + 1);
         } else glDisable(GL_SCISSOR_TEST);
+        glBindTexture(GL_TEXTURE_2D, runs_[i].tex ? runs_[i].tex : atlas_);
         glDrawArrays(GL_TRIANGLES, (GLint)a, (GLsizei)(b - a));
     }
     glDisable(GL_SCISSOR_TEST);
@@ -151,13 +153,13 @@ void Gfx::end() {
 void Gfx::pushClip(const Rect& r) {
     Rect c = clips_.empty() ? r.intersect(Rect(0, 0, (float)w_, (float)h_)) : r.intersect(clips_.back());
     clips_.push_back(c);
-    runs_.push_back({v_.size() / 13, c, true});
+    runs_.push_back({v_.size() / 13, c, true, 0});
 }
 void Gfx::popClip() {
     if (clips_.empty()) return;
     clips_.pop_back();
-    if (clips_.empty()) runs_.push_back({v_.size() / 13, Rect(), false});
-    else runs_.push_back({v_.size() / 13, clips_.back(), true});
+    if (clips_.empty()) runs_.push_back({v_.size() / 13, Rect(), false, 0});
+    else runs_.push_back({v_.size() / 13, clips_.back(), true, 0});
 }
 
 void Gfx::vtx(float x, float y, float u, float v, const Col& c, float hx, float hy, float rad, float mode, float sw) {
@@ -188,6 +190,30 @@ void Gfx::rectGrad(const Rect& r, const Col& top, const Col& bot, float radius) 
 void Gfx::stroke(const Rect& r, const Col& c, float radius, float width) {
     if (r.w <= 0 || r.h <= 0 || c.a <= 0) return;
     quad(r, 1.f, c, c, r.w * 0.5f, r.h * 0.5f, std::min(radius, std::min(r.w, r.h) * 0.5f), 2, width);
+}
+
+void Gfx::image(GLuint tex, const Rect& r, float alpha) {
+    if (!tex || r.w <= 0 || r.h <= 0) return;
+    Run prev = runs_.back();
+    runs_.push_back({v_.size() / 13, prev.clip, prev.hasClip, tex});
+    Col c(1, 1, 1, alpha);
+    float x0 = r.x, y0 = r.y, x1 = r.r(), y1 = r.b();
+    vtx(x0, y0, 0, 0, c, 0, 0, 0, 3, 0); vtx(x1, y0, 1, 0, c, 0, 0, 0, 3, 0); vtx(x1, y1, 1, 1, c, 0, 0, 0, 3, 0);
+    vtx(x0, y0, 0, 0, c, 0, 0, 0, 3, 0); vtx(x1, y1, 1, 1, c, 0, 0, 0, 3, 0); vtx(x0, y1, 0, 1, c, 0, 0, 0, 3, 0);
+    runs_.push_back({v_.size() / 13, prev.clip, prev.hasClip, 0});
+}
+
+GLuint Gfx::makeTexture(const uint8_t* rgb, int w, int h) {
+    GLuint t = 0;
+    glGenTextures(1, &t);
+    glBindTexture(GL_TEXTURE_2D, t);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, rgb);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    return t;
 }
 
 void Gfx::line(float x0, float y0, float x1, float y1, float w, const Col& c) {
@@ -372,6 +398,14 @@ void Gfx::icon(Icon ic, const Rect& rr, const Col& c) {
         case Icon::Lock: SR(0.22f, 0.44f, 0.56f, 0.42f, 0.06f); ARC(0.5f, 0.44f, 0.2f, PI, PI * 2); break;
         case Icon::Folder: SR(0.08f, 0.26f, 0.84f, 0.56f, 0.06f); L(0.08f, 0.26f, 0.2f, 0.16f); L(0.2f, 0.16f, 0.42f, 0.16f); L(0.42f, 0.16f, 0.5f, 0.26f); break;
         case Icon::Save: SR(0.14f, 0.14f, 0.72f, 0.72f, 0.06f); SR(0.3f, 0.14f, 0.34f, 0.24f, 0.02f); SR(0.28f, 0.54f, 0.44f, 0.32f, 0.02f); break;
+        case Icon::Ball: R(0.5f, 0.42f, 0.26f); L(0.2f, 0.86f, 0.8f, 0.86f); L(0.34f, 0.76f, 0.66f, 0.76f); break;
+        case Icon::Drop: T(0.5f, 0.1f, 0.24f, 0.56f, 0.76f, 0.56f); F(0.5f, 0.62f, 0.26f); break;
+        case Icon::Home: L(0.1f, 0.5f, 0.5f, 0.14f); L(0.5f, 0.14f, 0.9f, 0.5f); SR(0.2f, 0.46f, 0.6f, 0.4f, 0.04f); break;
+        case Icon::Back: L(0.62f, 0.2f, 0.28f, 0.5f); L(0.28f, 0.5f, 0.62f, 0.8f); break;
+        case Icon::Layers: SR(0.16f, 0.16f, 0.5f, 0.5f, 0.05f); SR(0.34f, 0.34f, 0.5f, 0.5f, 0.05f); break;
+        case Icon::Dots3: F(0.2f, 0.5f, 0.075f); F(0.5f, 0.5f, 0.075f); F(0.8f, 0.5f, 0.075f); break;
+        case Icon::Rig: F(0.5f, 0.16f, 0.09f); L(0.5f, 0.25f, 0.5f, 0.6f); L(0.5f, 0.34f, 0.22f, 0.52f); L(0.5f, 0.34f, 0.78f, 0.52f); L(0.5f, 0.6f, 0.3f, 0.9f); L(0.5f, 0.6f, 0.7f, 0.9f); break;
+        case Icon::Palette: R(0.5f, 0.5f, 0.38f); F(0.34f, 0.4f, 0.06f); F(0.52f, 0.28f, 0.06f); F(0.68f, 0.42f, 0.06f); break;
         case Icon::Gear: R(0.5f, 0.5f, 0.2f); for (int i = 0; i < 8; i++) { float a = PI * 2 * i / 8; L(0.5f + 0.24f * std::cos(a), 0.5f + 0.24f * std::sin(a), 0.5f + 0.38f * std::cos(a), 0.5f + 0.38f * std::sin(a)); } break;
     }
 }
@@ -529,6 +563,7 @@ int UI::segmented(const Rect& r, const std::vector<std::string>& items, int sel)
         Rect c(r.x + w * i, r.y, w, r.h);
         uint32_t id = newId();
         hit(id, c);
+        if (record) rects.emplace(items[i], c);
         if (i == sel) g.rect(c.inset(dp(2)), theme::accent, dp(7));
         float fs = dp(12.5f);
         g.textIn(c, g.fit(items[i], fs, w - dp(6)), fs, i == sel ? Col(1, 1, 1, 1) : theme::textDim, 1);
@@ -550,9 +585,9 @@ bool UI::listRow(const Rect& r, bool selected, bool* tappedOnly) {
 }
 
 // ---------------- прокрутка ----------------
-void UI::beginScroll(const Rect& view, ScrollState& s, float contentH) {
-    ScrollCtx c{view, &s, contentH, newId()};
-    float maxOff = std::max(0.f, contentH - view.h);
+void UI::beginScroll(const Rect& view, ScrollState& s, float contentH, bool horizontal) {
+    ScrollCtx c{view, &s, contentH, newId(), horizontal};
+    float maxOff = std::max(0.f, contentH - (horizontal ? view.w : view.h));
     s.off = clampf(s.off, 0.f, maxOff);
     scrolls_.push_back(c);
     g.pushClip(view);
@@ -564,12 +599,13 @@ void UI::endScroll() {
     scrolls_.pop_back();
     g.popClip();
     ScrollState& s = *c.s;
-    float maxOff = std::max(0.f, c.contentH - c.view.h);
-    if (!blocked && down_ && axis_ == 2 && inputInside(c.view) && (owner_ == 0 || owner_ == c.id)) {
+    float viewLen = c.horiz ? c.view.w : c.view.h;
+    float maxOff = std::max(0.f, c.contentH - viewLen);
+    if (!blocked && down_ && axis_ == (c.horiz ? 1 : 2) && inputInside(c.view) && (owner_ == 0 || owner_ == c.id)) {
         owner_ = c.id;
     }
     if (owner_ == c.id && down_) {
-        float dy = py_ - lastY_;
+        float dy = c.horiz ? px_ - lastX_ : py_ - lastY_;
         s.off -= dy;
         float inst = dt > 1e-4f ? -dy / dt : 0.f;
         s.vel = s.vel * 0.6f + inst * 0.4f;
@@ -580,7 +616,7 @@ void UI::endScroll() {
     }
     if (s.off < 0) { s.off = 0; s.vel = 0; }
     if (s.off > maxOff) { s.off = maxOff; s.vel = 0; }
-    if (maxOff > 1.f) {
+    if (maxOff > 1.f && !c.horiz) {
         float th = std::max(dp(24), c.view.h * c.view.h / c.contentH);
         float ty = c.view.y + (c.view.h - th) * (s.off / maxOff);
         g.rect(Rect(c.view.r() - dp(4), ty, dp(3), th), theme::textDim.alpha(0.5f), dp(2));

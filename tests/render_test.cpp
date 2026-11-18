@@ -139,6 +139,51 @@ void main(){ float d = texture(u_depth, v_uv).r; vec4 p = u_invProj * vec4(v_uv*
     if (!rd.renderStill(sc, v, 540, 960, 16, still)) { fprintf(stderr, "still failed\n"); return 1; }
     savePPM(out + "/still.ppm", still, 540, 960, false);
     er = glGetError(); if (er) fprintf(stderr, "GL error 0x%x after still\n", er);
+    if (getenv("FX")) {
+        // кадры эффектов: вспышки, взрывы разной силы, кровь
+        struct Shot { const char* name; FxKind k; int variant; float power; int frame; float rate; };
+        const Shot shots[] = {
+            {"fx_pistol", FxKind::Muzzle, 0, 1.f, 2, 0}, {"fx_shotgun", FxKind::Muzzle, 1, 1.f, 2, 0}, {"fx_rifle", FxKind::Muzzle, 2, 1.f, 3, 3},
+            {"fx_boom_small", FxKind::Explosion, 0, 0.5f, 8, 0}, {"fx_boom_mid", FxKind::Explosion, 0, 1.f, 8, 0}, {"fx_boom_big", FxKind::Explosion, 0, 3.f, 8, 0},
+            {"fx_boom_big_late", FxKind::Explosion, 0, 3.f, 30, 0}, {"fx_blood_burst", FxKind::Blood, 0, 1.f, 12, 0}, {"fx_blood_burst_late", FxKind::Blood, 0, 1.f, 60, 0},
+            {"fx_blood_flow", FxKind::Blood, 1, 1.f, 50, 0}};
+        for (const Shot& sh : shots) {
+            Scene s2;
+            rd.fxScene_ = nullptr;
+            if (getenv("NOBLOOM")) s2.render.bloom = false;
+            if (getenv("NOAO")) s2.render.ao = false;
+            if (getenv("NOSH")) s2.render.shadows = false;
+            if (getenv("NOCONTACT")) s2.render.contactShadows = false;
+            Object* c2 = s2.find(s2.activeCamera);
+            c2->t = {3.2f, 1.6f, 4.2f};
+            Mat4 l2 = lookAt(c2->t, {0.f, 0.8f, 0.f}, {0, 1, 0});
+            c2->r = Scene::eulerFromMat(inverse(l2));
+            int e = s2.addEffect(sh.k);
+            Object* eo = s2.find(e);
+            eo->t = {-0.6f, 1.0f, 0.f};
+            eo->r = {0, 1.5708f, 0};  // ось Z смотрит вдоль +X
+            eo->fxStart = 1; eo->fxEnd = sh.k == FxKind::Blood && sh.variant == 1 ? 90 : 24;
+            eo->fxVariant = sh.variant; eo->fxPower = sh.power; eo->fxRate = (int)sh.rate;
+            s2.evaluate(1);
+            s2.simulateTo(sh.frame);
+            s2.evaluate((float)sh.frame);
+            View v2 = Renderer::cameraView(*s2.find(s2.activeCamera), 1.f);
+            std::vector<uint8_t> px2;
+            if (!rd.renderStill(s2, v2, 540, 540, 4, px2)) { fprintf(stderr, "fx still failed %s\n", sh.name); continue; }
+            savePPM(out + "/" + sh.name + ".ppm", px2, 540, 540, false);
+            if (getenv("DBGHDR")) {
+                glBindFramebuffer(GL_FRAMEBUFFER, rd.st_.accum.fbo);
+                int aw = rd.st_.accum.w, ah = rd.st_.accum.h;
+                std::vector<float> f((size_t)aw * ah * 4);
+                glReadPixels(0, 0, aw, ah, GL_RGBA, GL_FLOAT, f.data());
+                int nn = 0, ni = 0; float mx = 0; int mxi = -1;
+                for (size_t i = 0; i < f.size(); i += 4) {
+                    for (int c = 0; c < 3; c++) { float x = f[i + c]; if (x != x) { if (nn < 3) printf("  nan at (%d,%d) ch %d\n", (int)(i / 4) % aw, (int)(i / 4) / aw, c); nn++; } else if (std::isinf(x)) ni++; else if (x > mx) { mx = x; mxi = (int)(i / 4); } }
+                }
+                printf("%s: nan=%d inf=%d max=%g at (%d,%d)\n", sh.name, nn, ni, mx, mxi % aw, mxi / aw);
+            }
+        }
+    }
     printf("done\n");
     return 0;
 }

@@ -18,7 +18,10 @@ struct Json;
 
 enum class ObjType { Model = 0, Light = 1, Camera = 2, Effect = 3 };
 enum class LightKind { Sun = 0, Point = 1 };
-enum class FxKind { Fire = 0, Smoke = 1, Muzzle = 2, Explosion = 3, Sparks = 4 };
+enum class FxKind { Fire = 0, Smoke = 1, Muzzle = 2, Explosion = 3, Sparks = 4, Blood = 5 };
+constexpr int kFxKinds = 6;
+// Вспышка выстрела: 0 пистолет, 1 дробовик, 2 автомат. Кровь: 0 брызги (удар), 1 течёт (рана).
+constexpr int kMuzzleVariants = 3;
 
 struct TKey {
     int frame = 1;
@@ -40,6 +43,30 @@ struct ClipKey {
 struct VisKey {
     int frame = 1;
     bool visible = true;
+};
+
+// Поза кости: поправка к позе клипа (или позе покоя) в пространстве родителя кости.
+struct BoneKey {
+    int frame = 1;
+    Vec3 t;
+    Quat r;
+    int ease = 1;
+};
+struct BoneTrack {
+    int node = -1;
+    std::vector<BoneKey> keys;
+};
+
+// Физика твёрдого тела: включается с выбранного кадра, до него объект идёт по ключам.
+struct PhysProps {
+    bool enabled = false;
+    int kind = 0;        // 0 падает и сталкивается, 1 неподвижное препятствие (пол, стена)
+    int shape = 0;       // 0 коробка по габаритам модели, 1 шар
+    float mass = 1.f, bounce = 0.3f, friction = 0.6f;
+    int start = 1;       // кадр включения
+    bool inherit = true; // подхватить скорость, с которой объект двигался по ключам
+    Vec3 vel;            // добавочная начальная скорость, м/с
+    Vec3 spin;           // добавочное вращение, рад/с
 };
 
 struct Object {
@@ -76,6 +103,13 @@ struct Object {
     int fxStart = 1, fxEnd = 120;
     float fxScale = 1.f;
     int fxRate = 0;  // вспышка: интервал между выстрелами в кадрах (0 = один выстрел)
+    int fxVariant = 0;    // вспышка: пистолет/дробовик/автомат; кровь: брызги/течёт
+    float fxPower = 1.f;  // сила взрыва, давление крови, яркость вспышки
+    bool fxPush = true;   // взрыв толкает объекты с физикой
+
+    // Физика и кости
+    PhysProps phys;
+    std::vector<BoneTrack> boneTracks;
 
     // ---- вычисляется при evaluate() ----
     Mat4 world;
@@ -93,6 +127,8 @@ struct RenderSettings {
     float bloomStrength = 0.25f;
     bool shadows = true;
     float shadowSoft = 1.f;
+    bool contactShadows = true;  // мелкие тени у самой земли и в щелях
+    int shadowRes = 2048;
     float skyBrightness = 0.6f;
     float skyTop[3] = {0.22f, 0.42f, 0.85f};
     float skyHorizon[3] = {0.78f, 0.84f, 0.92f};
@@ -166,6 +202,20 @@ public:
     const ParentKey* activeParent(const Object& o, float frame) const;
     void setClip(int id, int frame, int clip, float speed, bool loop);
 
+    // ---- кости ----
+    bool boneDeltaAt(const Object& o, int node, float f, Vec3& t, Quat& r) const;
+    bool boneHasKey(const Object& o, int node, int frame) const;
+    bool setBoneKey(int id, int node, int frame, Vec3 t, Quat r);
+    bool deleteBoneKey(int id, int node, int frame);
+    void clearBone(int id, int node);
+    int boneCount(const Object& o) const;                        // сколько костей в скелете модели
+    std::vector<int> boneNodes(const Object& o) const;           // узлы-кости (суставы скинов)
+
+    // ---- физика ----
+    void bakePhysics();                       // пересчитывается сама при изменении сцены
+    bool physicsActive(const Object& o, float f) const;
+    int physicsFrames() const { return phys_.last - phys_.first + 1; }
+
     // ---- эффекты ----
     Particles& particles() { return fx_; }
     void simulateTo(int frame);  // детерминированная симуляция частиц до кадра
@@ -199,6 +249,15 @@ private:
     void insertKeyRaw(Object& o, int frame, Vec3 t, Vec3 r, Vec3 s);
     std::string uniqueName(const std::string& base) const;
     bool wouldCycle(int child, int parent) const;
+
+    struct PhysBake {
+        std::map<int, std::vector<Mat4>> mats;  // по id объекта: положение на каждом кадре first..last
+        int first = 0, last = -1;
+        uint64_t sig = 0;
+        bool valid = false;
+    } phys_;
+    bool physOff_ = false, baking_ = false;
+    uint64_t physSignature() const;
 
     float frame_ = 1.f;
     int nextId_ = 1;

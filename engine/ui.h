@@ -43,7 +43,7 @@ extern Col bg, panel, panel2, widget, widgetHot, accent, accent2, text, textDim,
 
 enum class Icon {
     Eye, EyeOff, Plus, Trash, Copy, Undo, Redo, Play, Pause, Prev, Next, ToStart, ToEnd, Key, KeyAdd, Move, Rotate, Scale,
-    Camera, Sun, Bulb, Cube, Flame, Menu, ChevDown, ChevUp, Close, Link, Unlink, Film, Image, Check, Bone, Snap, Lock, Folder, Save, Gear, Smoke, Bolt, Sparks, Model
+    Camera, Sun, Bulb, Cube, Flame, Menu, ChevDown, ChevUp, Close, Link, Unlink, Film, Image, Check, Bone, Snap, Lock, Folder, Save, Gear, Smoke, Bolt, Sparks, Model, Ball, Drop, Home, Back, Layers, Dots3, Rig, Palette
 };
 
 class Gfx {
@@ -63,6 +63,8 @@ public:
     void line(float x0, float y0, float x1, float y1, float width, const Col& c);
     void tri(float x0, float y0, float x1, float y1, float x2, float y2, const Col& c);
     void icon(Icon ic, const Rect& r, const Col& c);
+    void image(GLuint tex, const Rect& r, float alpha = 1.f);  // готовая RGB-текстура (превью проектов)
+    static GLuint makeTexture(const uint8_t* rgb, int w, int h);
 
     // size - высота em в пикселях; y - базовая линия
     void text(const std::string& s, float x, float baselineY, float size, const Col& c);
@@ -75,7 +77,7 @@ public:
     Rect clip() const { return clips_.empty() ? Rect(0, 0, (float)w_, (float)h_) : clips_.back(); }
 
 private:
-    struct Run { size_t start; Rect clip; bool hasClip; };
+    struct Run { size_t start; Rect clip; bool hasClip; GLuint tex; };
     void vtx(float x, float y, float u, float v, const Col& c, float hx, float hy, float rad, float mode, float sw);
     void quad(const Rect& r, float margin, const Col& top, const Col& bot, float hx, float hy, float rad, float mode, float sw);
     int findGlyph(uint32_t code) const;
@@ -136,7 +138,7 @@ public:
     int segmented(const Rect& r, const std::vector<std::string>& items, int sel);
     bool listRow(const Rect& r, bool selected, bool* tappedOnly = nullptr);  // фон строки, возвращает true по тапу
 
-    void beginScroll(const Rect& view, ScrollState& s, float contentH);
+    void beginScroll(const Rect& view, ScrollState& s, float contentH, bool horizontal = false);
     void endScroll();
 
     // для кастомных зон (таймлайн, видовой экран): возвращает true, если касание началось внутри
@@ -164,7 +166,7 @@ private:
     bool moved_ = false;
     int axis_ = 0;
     uint32_t idCounter_ = 0, pressedId_ = 0, candidate_ = 0, owner_ = 0;
-    struct ScrollCtx { Rect view; ScrollState* s; float contentH; uint32_t id; };
+    struct ScrollCtx { Rect view; ScrollState* s; float contentH; uint32_t id; bool horiz; };
     std::vector<ScrollCtx> scrolls_;
     float sliderBase_ = 0;
     int w_ = 1, h_ = 1;

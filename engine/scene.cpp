@@ -7,6 +7,7 @@
 
 #include "geometry.h"
 #include "json.h"
+#include "physics.h"
 
 namespace eng {
 
@@ -221,17 +222,17 @@ int Scene::addCamera() {
 }
 
 int Scene::addEffect(FxKind k) {
-    static const char* names[] = {"Огонь", "Дым", "Вспышка", "Взрыв", "Искры"};
+    static const char* names[] = {"Огонь", "Дым", "Вспышка", "Взрыв", "Искры", "Кровь"};
     Object* o = new Object();
     o->id = nextId_++;
     o->type = ObjType::Effect;
     o->fx = k;
     o->name = uniqueName(names[(int)k]);
     o->fxStart = (int)std::lround(frame_);
-    o->fxEnd = k == FxKind::Explosion || k == FxKind::Muzzle ? o->fxStart + (k == FxKind::Muzzle ? 24 : 12) : proj.frameEnd;
+    o->fxEnd = k == FxKind::Explosion || k == FxKind::Muzzle || k == FxKind::Blood ? o->fxStart + (k == FxKind::Muzzle ? 24 : 12) : proj.frameEnd;
     if (k == FxKind::Muzzle) o->fxRate = 4;
     o->t = {0, 0.2f, 0};
-    if (k == FxKind::Muzzle || k == FxKind::Sparks) o->t = {0, 1.f, 0};
+    if (k == FxKind::Muzzle || k == FxKind::Sparks || k == FxKind::Blood) o->t = {0, 1.f, 0};
     int id = o->id;
     objects.emplace_back(o);
     selected = id;
@@ -251,6 +252,7 @@ int Scene::duplicate(int id) {
     o->metallic = s->metallic; o->roughness = s->roughness; o->emission = s->emission; o->castShadow = s->castShadow;
     o->light = s->light; std::memcpy(o->lcolor, s->lcolor, sizeof o->lcolor); o->energy = s->energy; o->lradius = s->lradius;
     o->fovDeg = s->fovDeg; o->fx = s->fx; o->fxStart = s->fxStart; o->fxEnd = s->fxEnd; o->fxScale = s->fxScale; o->fxRate = s->fxRate;
+    o->fxVariant = s->fxVariant; o->fxPower = s->fxPower; o->fxPush = s->fxPush; o->phys = s->phys; o->boneTracks = s->boneTracks;
     o->name = uniqueName(s->name);
     for (auto& k : o->keys) k.t = k.t + Vec3(0.5f, 0, 0.5f);
     int nid = o->id;
@@ -432,6 +434,12 @@ void Scene::evalAnimation(Object& o, float f) {
     if (o.type != ObjType::Model || o.model < 0 || o.model >= (int)models.size() || !models[o.model].model) return;
     Model* m = models[o.model].model.get();
     if (!o.anim) { o.anim.reset(new Animator()); o.anim->setModel(m); }
+    o.anim->deltas.clear();
+    for (const BoneTrack& tr : o.boneTracks) {
+        BoneDelta d;
+        d.node = tr.node;
+        if (boneDeltaAt(o, tr.node, f, d.t, d.r)) o.anim->deltas.push_back(d);
+    }
     if (o.clipKeys.empty() || m->clips.empty()) { o.anim->evaluate(-1, 0); return; }
     int fps = std::max(1, proj.fps);
     size_t i = 0;
@@ -472,12 +480,21 @@ Mat4 Scene::worldOf(Object& o, float f, std::vector<char>& state) {
             W = attachFrom(p, pk->node) * pk->offset;
         }
     }
+    if (!physOff_ && o.type == ObjType::Model && o.phys.enabled && o.phys.kind == 0 && f >= (float)o.phys.start) {
+        auto it = phys_.mats.find(o.id);
+        if (it != phys_.mats.end() && !it->second.empty()) {
+            int i = (int)std::lround(f) - o.phys.start;
+            i = std::max(0, std::min(i, (int)it->second.size() - 1));
+            W = it->second[i];
+        }
+    }
     o.world = W;
     if (idx >= 0) state[idx] = 2;
     return W;
 }
 
 void Scene::evaluate(float f) {
+    if (!baking_) bakePhysics();
     frame_ = f;
     for (auto& o : objects) {
         o->visibleNow = o->visible;
@@ -525,11 +542,15 @@ void Scene::stepEffects(int f) {
                 case FxKind::Sparks: fx_.emitSparks(pos, dir, sc, dt, o.fxAcc); break;
                 case FxKind::Muzzle: {
                     bool shot = o.fxRate <= 0 ? f == o.fxStart : ((f - o.fxStart) % o.fxRate == 0);
-                    if (sub == 0 && shot) fx_.muzzleFlash(pos, dir, sc);
+                    if (sub == 0 && shot) fx_.muzzleFlash(pos, dir, sc, o.fxVariant, o.fxPower);
                     break;
                 }
                 case FxKind::Explosion:
-                    if (sub == 0 && f == o.fxStart) fx_.explosion(pos, sc);
+                    if (sub == 0 && f == o.fxStart) fx_.explosion(pos, sc, o.fxPower);
+                    break;
+                case FxKind::Blood:
+                    if (o.fxVariant == 0) { if (sub == 0 && f == o.fxStart) fx_.bloodBurst(pos, dir, sc, o.fxPower); }
+                    else fx_.bloodFlow(pos, dir, sc, o.fxPower, dt, o.fxAcc);
                     break;
             }
         }
@@ -540,7 +561,7 @@ void Scene::stepEffects(int f) {
 void Scene::simulateTo(int frame) {
     int warm = 5 * std::max(1, proj.fps);
     bool anyFx = false;
-    for (auto& o : objects) if (o->type == ObjType::Effect) { anyFx = true; break; }
+    for (auto& o : objects) if (o->type == ObjType::Effect) { anyFx = true; if (o->fx == FxKind::Blood) warm = 1 << 20; }  // пятна крови остаются навсегда
     if (!anyFx) { evaluate((float)frame); simFrame_ = frame; return; }
     if (frame == simFrame_) { evaluate((float)frame); return; }
     int begin;
@@ -548,6 +569,254 @@ void Scene::simulateTo(int frame) {
     else { resetEffects(); begin = std::max(frame - warm, proj.frameStart); }
     for (int f = begin; f <= frame; f++) { evaluate((float)f); stepEffects(f); }
     simFrame_ = frame;
+}
+
+// ============================================================ кости
+std::vector<int> Scene::boneNodes(const Object& o) const {
+    std::vector<int> out;
+    if (o.type != ObjType::Model || o.model < 0 || o.model >= (int)models.size() || !models[o.model].model) return out;
+    const Model& m = *models[o.model].model;
+    std::vector<char> seen(m.nodes.size(), 0);
+    for (const Skin& sk : m.skins)
+        for (int j : sk.joints) if (j >= 0 && j < (int)seen.size() && !seen[j]) { seen[j] = 1; out.push_back(j); }
+    if (out.empty() && m.nodes.size() > 1)  // жёсткий скелет без скина: любой узел можно крутить
+        for (int i : m.order) out.push_back(i);
+    return out;
+}
+
+int Scene::boneCount(const Object& o) const { return (int)boneNodes(o).size(); }
+
+bool Scene::boneDeltaAt(const Object& o, int node, float f, Vec3& t, Quat& r) const {
+    for (const BoneTrack& tr : o.boneTracks) {
+        if (tr.node != node || tr.keys.empty()) continue;
+        const auto& k = tr.keys;
+        if (f <= k.front().frame) { t = k.front().t; r = k.front().r; return true; }
+        if (f >= k.back().frame) { t = k.back().t; r = k.back().r; return true; }
+        size_t i = 0;
+        while (i + 1 < k.size() && k[i + 1].frame <= f) i++;
+        const BoneKey& a = k[i];
+        const BoneKey& b = k[i + 1];
+        float u = (f - a.frame) / std::max(1.f, (float)(b.frame - a.frame));
+        if (a.ease == 2) u = 0;
+        else if (a.ease == 1) u = u * u * (3.f - 2.f * u);
+        t = lerp(a.t, b.t, u);
+        r = slerp(a.r, b.r, u);
+        return true;
+    }
+    return false;
+}
+
+bool Scene::boneHasKey(const Object& o, int node, int frame) const {
+    for (const BoneTrack& tr : o.boneTracks)
+        if (tr.node == node) for (const BoneKey& k : tr.keys) if (k.frame == frame) return true;
+    return false;
+}
+
+bool Scene::setBoneKey(int id, int node, int frame, Vec3 t, Quat r) {
+    Object* o = find(id);
+    if (!o || o->type != ObjType::Model) return false;
+    BoneTrack* tr = nullptr;
+    for (auto& x : o->boneTracks) if (x.node == node) tr = &x;
+    if (!tr) { o->boneTracks.push_back(BoneTrack()); tr = &o->boneTracks.back(); tr->node = node; }
+    bool done = false;
+    for (auto& k : tr->keys) if (k.frame == frame) { k.t = t; k.r = normalize(r); done = true; }
+    if (!done) {
+        BoneKey k; k.frame = frame; k.t = t; k.r = normalize(r);
+        tr->keys.push_back(k);
+        std::sort(tr->keys.begin(), tr->keys.end(), [](const BoneKey& a, const BoneKey& b) { return a.frame < b.frame; });
+    }
+    evaluate(frame_);
+    return true;
+}
+
+bool Scene::deleteBoneKey(int id, int node, int frame) {
+    Object* o = find(id);
+    if (!o) return false;
+    bool changed = false;
+    for (auto& tr : o->boneTracks) {
+        if (tr.node != node) continue;
+        size_t n = tr.keys.size();
+        tr.keys.erase(std::remove_if(tr.keys.begin(), tr.keys.end(), [&](const BoneKey& k) { return k.frame == frame; }), tr.keys.end());
+        changed |= n != tr.keys.size();
+    }
+    o->boneTracks.erase(std::remove_if(o->boneTracks.begin(), o->boneTracks.end(), [](const BoneTrack& t) { return t.keys.empty(); }), o->boneTracks.end());
+    if (changed) evaluate(frame_);
+    return changed;
+}
+
+void Scene::clearBone(int id, int node) {
+    Object* o = find(id);
+    if (!o) return;
+    o->boneTracks.erase(std::remove_if(o->boneTracks.begin(), o->boneTracks.end(), [&](const BoneTrack& t) { return t.node == node; }), o->boneTracks.end());
+    evaluate(frame_);
+}
+
+// ============================================================ физика
+static inline void hmix(uint64_t& h, uint32_t v) { h ^= v; h *= 1099511628211ull; }
+static inline void hf(uint64_t& h, float f) { uint32_t u; std::memcpy(&u, &f, 4); hmix(h, u); }
+static inline void hv(uint64_t& h, Vec3 v) { hf(h, v.x); hf(h, v.y); hf(h, v.z); }
+
+uint64_t Scene::physSignature() const {
+    uint64_t h = 1469598103934665603ull;
+    hmix(h, (uint32_t)proj.fps); hmix(h, (uint32_t)proj.frameStart); hmix(h, (uint32_t)proj.frameEnd); hmix(h, render.floor ? 1u : 0u);
+    for (const auto& op : objects) {
+        const Object& o = *op;
+        bool rel = o.type == ObjType::Model || (o.type == ObjType::Effect && o.fx == FxKind::Explosion);
+        if (!rel) continue;
+        hmix(h, (uint32_t)o.id); hmix(h, (uint32_t)o.model);
+        hv(h, o.t); hv(h, o.r); hv(h, o.s);
+        for (const auto& k : o.keys) { hmix(h, (uint32_t)k.frame); hv(h, k.t); hv(h, k.r); hv(h, k.s); hmix(h, (uint32_t)k.ease); }
+        for (const auto& k : o.parents) { hmix(h, (uint32_t)k.frame); hmix(h, (uint32_t)k.parent); hmix(h, (uint32_t)k.node); for (int q = 0; q < 16; q++) hf(h, k.offset.m[q]); }
+        for (const auto& k : o.clipKeys) { hmix(h, (uint32_t)k.frame); hmix(h, (uint32_t)k.clip); hf(h, k.speed); }
+        for (const auto& tr : o.boneTracks) for (const auto& k : tr.keys) { hmix(h, (uint32_t)tr.node); hmix(h, (uint32_t)k.frame); hv(h, k.t); hf(h, k.r.x); hf(h, k.r.y); hf(h, k.r.z); hf(h, k.r.w); }
+        const PhysProps& p = o.phys;
+        hmix(h, p.enabled ? 1u : 0u); hmix(h, (uint32_t)p.kind); hmix(h, (uint32_t)p.shape); hf(h, p.mass); hf(h, p.bounce); hf(h, p.friction);
+        hmix(h, (uint32_t)p.start); hmix(h, p.inherit ? 1u : 0u); hv(h, p.vel); hv(h, p.spin);
+        if (o.type == ObjType::Effect) { hmix(h, (uint32_t)o.fxStart); hf(h, o.fxPower); hf(h, o.fxScale); hmix(h, o.fxPush ? 1u : 0u); }
+    }
+    return h;
+}
+
+bool Scene::physicsActive(const Object& o, float f) const {
+    return o.type == ObjType::Model && o.phys.enabled && o.phys.kind == 0 && f >= (float)o.phys.start;
+}
+
+void Scene::bakePhysics() {
+    if (baking_) return;
+    uint64_t sig = physSignature();
+    if (phys_.valid && phys_.sig == sig) return;
+    phys_.mats.clear();
+    phys_.valid = true;
+    phys_.sig = sig;
+    phys_.first = 0;
+    phys_.last = -1;
+    std::vector<Object*> dyn, col, boom;
+    for (auto& op : objects) {
+        Object* o = op.get();
+        if (o->type == ObjType::Model && o->phys.enabled && o->model >= 0 && o->model < (int)models.size() && models[o->model].model) (o->phys.kind == 0 ? dyn : col).push_back(o);
+        else if (o->type == ObjType::Effect && o->fx == FxKind::Explosion && o->fxPush) boom.push_back(o);
+    }
+    if (dyn.empty()) return;
+
+    baking_ = true;
+    physOff_ = true;
+    float saved = frame_;
+    int fps = std::max(1, proj.fps);
+    int first = 1 << 30;
+    for (Object* o : dyn) first = std::min(first, std::max(0, o->phys.start));
+    int last = std::max(proj.frameEnd, first);
+    last = std::min(last, first + 6000);
+    phys_.first = first;
+    phys_.last = last;
+
+    struct Rec {
+        Object* o;
+        bool created = false;
+        int body = -1;
+        Mat4 W0, Tb0inv;
+        Vec3 localC, half;
+    };
+    std::vector<Rec> recs;
+    for (Object* o : dyn) { Rec r; r.o = o; recs.push_back(r); }
+
+    PhysicsWorld w;
+    w.setGravity({0, -9.81f, 0});
+    w.setGroundY(0.f);
+    w.setGroundEnabled(render.floor);
+    int sub = std::max(1, (int)std::lround(120.0 / fps));
+    float dtSub = 1.f / (float)fps / (float)sub;
+
+    auto boxOf = [&](const Object& o, Vec3& centerW, Quat& q, Vec3& half, Vec3& localC) {
+        const Model& m = *models[o.model].model;
+        Mat4 M = o.world * o.fit;
+        Vec3 t, sc;
+        decompose(M, t, q, sc);
+        q = normalize(q);
+        localC = (m.bmin + m.bmax) * 0.5f;
+        centerW = transformPoint(M, localC);
+        Vec3 ext = (m.bmax - m.bmin) * 0.5f;
+        half = {std::max(0.02f, std::fabs(sc.x) * ext.x), std::max(0.02f, std::fabs(sc.y) * ext.y), std::max(0.02f, std::fabs(sc.z) * ext.z)};
+    };
+
+    std::map<int, Mat4> prevW;
+    for (int f = first - 1; f <= last; f++) {
+        evaluate((float)f);
+        if (f < first) { for (Rec& r : recs) prevW[r.o->id] = r.o->world; continue; }
+
+        // тела появляются на своём стартовом кадре
+        for (Rec& r : recs) {
+            if (r.created || f < r.o->phys.start) continue;
+            Vec3 c, half, lc;
+            Quat q;
+            boxOf(*r.o, c, q, half, lc);
+            BodyDesc d;
+            d.pos = c; d.rot = q;
+            if (r.o->phys.shape == 1) { d.shape = ShapeType::Sphere; d.radius = std::max(0.02f, (half.x + half.y + half.z) / 3.f); }
+            else { d.shape = ShapeType::Box; d.half = half; }
+            d.mass = std::max(0.05f, r.o->phys.mass);
+            d.friction = clampf(r.o->phys.friction, 0.f, 2.f);
+            d.restitution = clampf(r.o->phys.bounce, 0.f, 0.98f);
+            Vec3 v = r.o->phys.vel;
+            if (r.o->phys.inherit && prevW.count(r.o->id)) {
+                Vec3 cp = transformPoint(prevW[r.o->id] * r.o->fit, lc);
+                Vec3 dv = (c - cp) * (float)fps;
+                float sp = length(dv);
+                if (sp > 40.f) dv = dv * (40.f / sp);
+                v = v + dv;
+            }
+            d.vel = v;
+            d.angVel = r.o->phys.spin;
+            r.body = w.addBody(d);
+            r.created = r.body >= 0;
+            r.localC = lc; r.half = half;
+            r.W0 = r.o->world;
+            r.Tb0inv = inverse(translate(c) * fromQuat(q));
+            phys_.mats[r.o->id];  // создаёт запись
+        }
+
+        // препятствия
+        w.clearStaticBoxes();
+        for (Object* o : col) {
+            Vec3 c, half, lc;
+            Quat q;
+            boxOf(*o, c, q, half, lc);
+            w.addStaticBox(c, q, half);
+        }
+
+        // взрывы толкают тела
+        for (Object* e : boom) {
+            if (f != e->fxStart || !e->visibleNow) continue;
+            Vec3 c = transformPoint(e->world, {0, 0, 0});
+            float pw = std::max(0.1f, e->fxPower), sc = std::max(0.1f, e->fxScale);
+            float radius = (3.f + 5.f * pw) * sc, speed = 9.f * pw * std::sqrt(sc);
+            for (Rec& r : recs) {
+                if (!r.created) continue;
+                const Body& b = w.bodies()[r.body];
+                Vec3 dv = b.pos - c;
+                float dist = length(dv);
+                if (dist > radius) continue;
+                float k = 1.f - dist / radius;
+                Vec3 dir = normalize(dist > 1e-4f ? dv + Vec3(0, 0.35f * radius * 0.25f, 0) : Vec3(0, 1, 0));
+                Vec3 side = normalize(cross(dir, Vec3(0.3f, 1, 0.2f)));
+                float mass = b.invMass > 0 ? 1.f / b.invMass : 1.f;
+                float size = b.shape == ShapeType::Sphere ? b.radius : length(b.half);
+                w.applyImpulse(r.body, dir * (speed * k * k * mass), b.pos + side * (0.4f * size));
+            }
+        }
+
+        // запись положения на начало кадра, затем шаг
+        for (Rec& r : recs) {
+            if (!r.created) continue;
+            const Body& b = w.bodies()[r.body];
+            Mat4 Tb = translate(b.pos) * fromQuat(b.rot);
+            phys_.mats[r.o->id].push_back(Tb * r.Tb0inv * r.W0);
+        }
+        for (int k = 0; k < sub; k++) w.step(dtSub);
+        for (Rec& r : recs) prevW[r.o->id] = r.o->world;
+    }
+    physOff_ = false;
+    baking_ = false;
+    evaluate(saved);
 }
 
 // ============================================================ выбор
@@ -628,7 +897,7 @@ std::string Scene::toJson() const {
     o.key("exposure"); o.num(r.exposure); o.raw(","); o.key("contrast"); o.num(r.contrast); o.raw(","); o.key("saturation"); o.num(r.saturation); o.raw(",");
     o.key("ao"); o.raw(r.ao ? "true," : "false,"); o.key("aoStrength"); o.num(r.aoStrength); o.raw(",");
     o.key("bloom"); o.raw(r.bloom ? "true," : "false,"); o.key("bloomStrength"); o.num(r.bloomStrength); o.raw(",");
-    o.key("shadows"); o.raw(r.shadows ? "true," : "false,"); o.key("shadowSoft"); o.num(r.shadowSoft); o.raw(",");
+    o.key("shadows"); o.raw(r.shadows ? "true," : "false,"); o.key("shadowSoft"); o.num(r.shadowSoft); o.raw(","); o.key("contact"); o.raw(r.contactShadows ? "true," : "false,");
     o.key("skyBrightness"); o.num(r.skyBrightness); o.raw(",");
     o.key("skyTop"); o.arr3(r.skyTop); o.raw(","); o.key("skyHorizon"); o.arr3(r.skyHorizon); o.raw(","); o.key("skyGround"); o.arr3(r.skyGround); o.raw(",");
     o.key("floor"); o.raw(r.floor ? "true," : "false,"); o.key("floorColor"); o.arr3(r.floorColor); o.raw(","); o.key("floorRoughness"); o.num(r.floorRoughness); o.raw(",");
@@ -680,7 +949,26 @@ std::string Scene::toJson() const {
         o.key("light"); o.num((int)b.light); o.raw(","); o.key("lcolor"); o.arr3(b.lcolor); o.raw(","); o.key("energy"); o.num(b.energy); o.raw(","); o.key("lradius"); o.num(b.lradius); o.raw(",");
         o.key("fov"); o.num(b.fovDeg); o.raw(",");
         o.key("fx"); o.num((int)b.fx); o.raw(","); o.key("fxStart"); o.num(b.fxStart); o.raw(","); o.key("fxEnd"); o.num(b.fxEnd); o.raw(",");
-        o.key("fxScale"); o.num(b.fxScale); o.raw(","); o.key("fxRate"); o.num(b.fxRate);
+        o.key("fxScale"); o.num(b.fxScale); o.raw(","); o.key("fxRate"); o.num(b.fxRate); o.raw(",");
+        o.key("fxVar"); o.num(b.fxVariant); o.raw(","); o.key("fxPower"); o.num(b.fxPower); o.raw(","); o.key("fxPush"); o.raw(b.fxPush ? "true," : "false,");
+        o.key("phys"); o.raw("{"); o.key("on"); o.raw(b.phys.enabled ? "true," : "false,"); o.key("kind"); o.num(b.phys.kind); o.raw(",");
+        o.key("shape"); o.num(b.phys.shape); o.raw(","); o.key("mass"); o.num(b.phys.mass); o.raw(","); o.key("bounce"); o.num(b.phys.bounce); o.raw(",");
+        o.key("fric"); o.num(b.phys.friction); o.raw(","); o.key("start"); o.num(b.phys.start); o.raw(","); o.key("inherit"); o.raw(b.phys.inherit ? "true," : "false,");
+        o.key("vel"); o.vec(b.phys.vel); o.raw(","); o.key("spin"); o.vec(b.phys.spin); o.raw("},");
+        o.key("bones"); o.raw("[");
+        for (size_t k = 0; k < b.boneTracks.size(); k++) {
+            const BoneTrack& tr = b.boneTracks[k];
+            if (k) o.raw(",");
+            o.raw("{"); o.key("n"); o.num(tr.node); o.raw(","); o.key("k"); o.raw("[");
+            for (size_t q = 0; q < tr.keys.size(); q++) {
+                const BoneKey& bk = tr.keys[q];
+                if (q) o.raw(",");
+                o.raw("{"); o.key("f"); o.num(bk.frame); o.raw(","); o.key("t"); o.vec(bk.t); o.raw(","); o.key("q"); o.raw("[");
+                o.num(bk.r.x); o.raw(","); o.num(bk.r.y); o.raw(","); o.num(bk.r.z); o.raw(","); o.num(bk.r.w); o.raw("],"); o.key("e"); o.num(bk.ease); o.raw("}");
+            }
+            o.raw("]}");
+        }
+        o.raw("]");
         o.raw("}");
     }
     o.raw("]}");
@@ -729,7 +1017,26 @@ bool Scene::applyScene(const Json& j, std::string* err) {
         jarr3(b["lcolor"], o->lcolor);
         o->energy = (float)b["energy"].number(20); o->lradius = (float)b["lradius"].number(8);
         o->fovDeg = (float)b["fov"].number(40);
-        o->fx = (FxKind)clampf((float)b["fx"].integer(0), 0, 4);
+        o->fx = (FxKind)clampf((float)b["fx"].integer(0), 0, (float)(kFxKinds - 1));
+        o->fxVariant = b["fxVar"].integer(0); o->fxPower = (float)b["fxPower"].number(1); o->fxPush = jbool(b["fxPush"], true);
+        {
+            const Json& pj = b["phys"];
+            o->phys.enabled = jbool(pj["on"], false); o->phys.kind = pj["kind"].integer(0); o->phys.shape = pj["shape"].integer(0);
+            o->phys.mass = (float)pj["mass"].number(1); o->phys.bounce = (float)pj["bounce"].number(0.3); o->phys.friction = (float)pj["fric"].number(0.6);
+            o->phys.start = pj["start"].integer(1); o->phys.inherit = jbool(pj["inherit"], true);
+            o->phys.vel = jvec(pj["vel"]); o->phys.spin = jvec(pj["spin"]);
+            for (size_t k = 0; k < b["bones"].size(); k++) {
+                const Json& e = b["bones"][k];
+                BoneTrack tr; tr.node = e["n"].integer(-1);
+                for (size_t q = 0; q < e["k"].size(); q++) {
+                    const Json& kk = e["k"][q];
+                    BoneKey bk; bk.frame = kk["f"].integer(1); bk.t = jvec(kk["t"]); bk.ease = kk["e"].integer(1);
+                    if (kk["q"].size() == 4) bk.r = normalize(Quat((float)kk["q"][0].number(), (float)kk["q"][1].number(), (float)kk["q"][2].number(), (float)kk["q"][3].number()));
+                    tr.keys.push_back(bk);
+                }
+                if (tr.node >= 0 && !tr.keys.empty()) o->boneTracks.push_back(tr);
+            }
+        }
         o->fxStart = b["fxStart"].integer(1); o->fxEnd = b["fxEnd"].integer(120); o->fxScale = (float)b["fxScale"].number(1); o->fxRate = b["fxRate"].integer(0);
         if (o->type == ObjType::Model && (o->model < 0 || o->model >= (int)models.size())) continue;  // модель потеряна
         newObjs.push_back(std::move(o));
@@ -750,7 +1057,7 @@ bool Scene::applyScene(const Json& j, std::string* err) {
     render.exposure = (float)r["exposure"].number(d.exposure); render.contrast = (float)r["contrast"].number(d.contrast); render.saturation = (float)r["saturation"].number(d.saturation);
     render.ao = jbool(r["ao"], d.ao); render.aoStrength = (float)r["aoStrength"].number(d.aoStrength);
     render.bloom = jbool(r["bloom"], d.bloom); render.bloomStrength = (float)r["bloomStrength"].number(d.bloomStrength);
-    render.shadows = jbool(r["shadows"], d.shadows); render.shadowSoft = (float)r["shadowSoft"].number(d.shadowSoft);
+    render.shadows = jbool(r["shadows"], d.shadows); render.shadowSoft = (float)r["shadowSoft"].number(d.shadowSoft); render.contactShadows = jbool(r["contact"], d.contactShadows);
     render.skyBrightness = (float)r["skyBrightness"].number(d.skyBrightness);
     jarr3(r["skyTop"], render.skyTop); jarr3(r["skyHorizon"], render.skyHorizon); jarr3(r["skyGround"], render.skyGround);
     render.floor = jbool(r["floor"], d.floor); jarr3(r["floorColor"], render.floorColor); render.floorRoughness = (float)r["floorRoughness"].number(d.floorRoughness);

@@ -73,6 +73,7 @@ private:
         GLint hasTex = -1, hasMR = -1, hasN = -1, hasE = -1, hasO = -1, alphaMode = -1, cutoff = -1;
         GLint metal = -1, rough = -1, nScale = -1, emis = -1, tint = -1, useVC = -1;
         GLint cam = -1, L = -1, sunCol = -1, lightVP = -1, texel = -1, shadowSoft = -1, shadowOn = -1, pass = -1;
+        GLint shadowRaw = -1, uvPerM = -1, shRange = -1, contact = -1;
         GLint skyTop = -1, skyHor = -1, skyGnd = -1, skyBright = -1, pl = -1, plc = -1, nPl = -1, outScale = -1, isFloor = -1, fogCol = -1;
     };
     struct FrameLights {
@@ -108,7 +109,7 @@ private:
     GLuint pbr_ = 0, depthP_ = 0, sky_ = 0, ssao_ = 0, blur_ = 0, down_ = 0, up_ = 0, tone_ = 0, fxaa_ = 0, acc_ = 0;
     Locs L_, dL_;
     GLuint emptyVao_ = 0;
-    GLuint shadowTex_ = 0, shadowFbo_ = 0;
+    GLuint shadowTex_ = 0, shadowFbo_ = 0, rawSampler_ = 0;
     int shadowSize_ = 2048;
     GLuint whiteTex_ = 0;
     MeshData floorMesh_;
@@ -119,6 +120,8 @@ private:
     float sceneRadius_ = 4.f;
     float pixelScale_ = 1.f;
     Scene* fxScene_ = nullptr;
+    Vec3 sunDir_{0, 1, 0};
+    bool hasSun_ = false, contactOn_ = true;
     GLint uSky_[8] = {0};
     // uniform-локации постобработки
     GLint tU_[24] = {0}, sU_[16] = {0}, bU_[8] = {0}, dU_[8] = {0}, uU_[8] = {0}, fU_[4] = {0}, aU_[4] = {0}, skU_[12] = {0};

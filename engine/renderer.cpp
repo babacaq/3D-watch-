@@ -40,7 +40,8 @@ static const char* kPbrFS = R"(#version 300 es
 precision highp float; precision highp sampler2D; precision highp sampler2DShadow;
 in vec3 v_n; in vec3 v_w; in vec4 v_c; in vec2 v_uv;
 uniform sampler2D u_tex; uniform sampler2D u_texMR; uniform sampler2D u_texN; uniform sampler2D u_texE; uniform sampler2D u_texO;
-uniform sampler2DShadow u_shadow;
+uniform sampler2DShadow u_shadow; uniform sampler2D u_shadowRaw;
+uniform float u_uvPerM, u_shRange;
 uniform int u_hasTex, u_hasMR, u_hasN, u_hasE, u_hasO, u_alphaMode, u_shadowOn, u_useVC, u_nPl, u_isFloor;
 uniform float u_cutoff, u_metal, u_rough, u_nScale, u_texel, u_shadowSoft, u_pass, u_skyBright, u_outScale;
 uniform vec3 u_emis, u_cam, u_L, u_sunCol, u_skyTop, u_skyHor, u_skyGnd;
@@ -72,14 +73,24 @@ vec2 envBRDF(float r, float nv){
 }
 float shadowAt(vec3 wp, vec3 n, float ndl){
   if (u_shadowOn == 0) return 1.0;
-  vec4 lp = u_lightVP * vec4(wp + n * (0.015 + 0.05 * (1.0 - ndl)), 1.0);
+  vec4 lp = u_lightVP * vec4(wp + n * (0.012 + 0.045 * (1.0 - ndl)), 1.0);
   vec3 c = lp.xyz / lp.w * 0.5 + 0.5;
   if (c.x < 0.0 || c.x > 1.0 || c.y < 0.0 || c.y > 1.0 || c.z > 1.0) return 1.0;
   float ang = hash(gl_FragCoord.xy + u_pass * 7.31) * 6.2831853;
   mat2 R = mat2(cos(ang), sin(ang), -sin(ang), cos(ang));
-  float rad = u_texel * (1.4 + 3.2 * u_shadowSoft);
+  // 1) поиск перекрывающих: насколько далеко от поверхности стоит предмет, отбрасывающий тень
+  float searchR = u_texel * (5.0 + 5.0 * u_shadowSoft);
+  float sum = 0.0, cnt = 0.0;
+  for (int i = 0; i < 8; i++) {
+    float d = texture(u_shadowRaw, c.xy + R * POIS[i] * searchR).r;
+    if (d < c.z - 0.0008) { sum += d; cnt += 1.0; }
+  }
+  if (cnt < 0.5) return 1.0;
+  float dist = (c.z - sum / cnt) * u_shRange;                     // метры между предметом и тенью
+  // 2) ширина полутени растёт с расстоянием: у ног тень резкая, дальше мягкая
+  float rad = clamp(dist * 0.045 * u_shadowSoft * u_uvPerM, u_texel * 1.3, u_texel * 26.0);
   float s = 0.0;
-  for (int i = 0; i < 16; i++) s += texture(u_shadow, vec3(c.xy + R * POIS[i] * rad, c.z - 0.0006));
+  for (int i = 0; i < 16; i++) s += texture(u_shadow, vec3(c.xy + R * POIS[i] * rad, c.z - 0.0005));
   return s / 16.0;
 }
 mat3 cotangentFrame(vec3 N, vec3 p, vec2 uv){
@@ -206,7 +217,7 @@ void main(){ vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)
 static const char* kSsaoFS = R"(#version 300 es
 precision highp float; precision highp sampler2D;
 in vec2 v_uv; out vec4 o;
-uniform sampler2D u_depth; uniform mat4 u_invProj; uniform mat4 u_proj; uniform vec2 u_texel; uniform float u_radius, u_pass, u_strength;
+uniform sampler2D u_depth; uniform mat4 u_invProj; uniform mat4 u_proj; uniform vec2 u_texel; uniform float u_radius, u_pass, u_strength, u_contact; uniform vec3 u_sunV;
 vec3 viewPos(vec2 uv){
   float d = texture(u_depth, uv).r;
   vec4 p = u_invProj * vec4(uv * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);
@@ -240,7 +251,23 @@ void main(){
     occ += (sd >= sp.z + (0.03 * u_radius + 0.002 * (-P.z)) ? 1.0 : 0.0) * range;
   }
   float fade = 1.0 - smoothstep(10.0, 28.0, -P.z);
-  o = vec4(1.0 - occ / 12.0 * u_strength * fade);
+  // контактная тень: короткий луч к солнцу по буферу глубины
+  float contact = 0.0;
+  if (u_contact > 0.0 && dot(N, u_sunV) > 0.05) {
+    float jit = hash(gl_FragCoord.xy * 1.7 + u_pass * 3.1);
+    for (int i = 0; i < 10; i++) {
+      float t = (float(i) + 0.5 + jit * 0.7) / 10.0;
+      vec3 sp = P + u_sunV * (0.6 * t * t + 0.02) + N * 0.008;
+      vec4 pp = u_proj * vec4(sp, 1.0);
+      vec2 suv = pp.xy / pp.w * 0.5 + 0.5;
+      if (suv.x < 0.0 || suv.x > 1.0 || suv.y < 0.0 || suv.y > 1.0) break;
+      float diff = viewPos(suv).z - sp.z;
+      if (diff > 0.012 + 0.004 * (-P.z) && diff < 0.35) { contact = 1.0; break; }
+    }
+  }
+  float ao = 1.0 - occ / 12.0 * u_strength * fade;
+  ao *= 1.0 - contact * u_contact * 0.6 * fade;
+  o = vec4(ao);
 }
 )";
 
@@ -273,9 +300,10 @@ uniform sampler2D u_src; uniform vec2 u_texel; uniform float u_thresh, u_inScale
 vec3 s(vec2 d){ return texture(u_src, v_uv + d * u_texel).rgb * u_inScale; }
 void main(){
   vec3 c = s(vec2(0.0)) * 0.5 + (s(vec2(-1.0,-1.0)) + s(vec2(1.0,-1.0)) + s(vec2(-1.0,1.0)) + s(vec2(1.0,1.0))) * 0.125;
+  if (!(c.r < 1e6 && c.g < 1e6 && c.b < 1e6)) c = vec3(0.0);   // NaN/Inf не должны расползаться по мипам
   if (u_first != 0) {
     float l = max(c.r, max(c.g, c.b));
-    c *= clamp(l - u_thresh, 0.0, 8.0) / max(l, 1e-4);
+    c *= clamp(l - u_thresh, 0.0, 2.5) / max(l, 1e-4);
   }
   o = vec4(c, 1.0);
 }
@@ -303,6 +331,7 @@ vec3 aces(vec3 x){ return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59)
 float hash(vec2 p){ return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715)))); }
 void main(){
   vec3 c = texture(u_hdr, v_uv).rgb * u_inScale;
+  if (!(c.r < 1e6 && c.g < 1e6 && c.b < 1e6)) c = vec3(0.0);
   if (u_useAo != 0) c *= texture(u_ao, v_uv).r;
   if (u_useBloom != 0) c += texture(u_bloom, v_uv).rgb * u_bloomStr;
   c *= u_exposure;
@@ -347,6 +376,7 @@ in vec2 v_uv; out vec4 o;
 uniform sampler2D u_hdr; uniform sampler2D u_ao; uniform float u_weight, u_inScale; uniform int u_useAo;
 void main(){
   vec3 c = texture(u_hdr, v_uv).rgb * u_inScale;
+  if (!(c.r < 1e6 && c.g < 1e6 && c.b < 1e6)) c = vec3(0.0);   // защита от NaN/Inf в одном проходе
   if (u_useAo != 0) c *= texture(u_ao, v_uv).r;
   o = vec4(c * u_weight, 1.0);
 }
@@ -495,7 +525,7 @@ bool Renderer::buildPrograms() {
         Locs L;
         auto u = [&](const char* n) { return glGetUniformLocation(p, n); };
         L.vp = u("u_vp"); L.model = u("u_model"); L.nrm = u("u_nrm"); L.joints = u("u_joints"); L.skinned = u("u_skinned");
-        L.tex = u("u_tex"); L.texMR = u("u_texMR"); L.texN = u("u_texN"); L.texE = u("u_texE"); L.texO = u("u_texO"); L.shadow = u("u_shadow");
+        L.tex = u("u_tex"); L.texMR = u("u_texMR"); L.texN = u("u_texN"); L.texE = u("u_texE"); L.texO = u("u_texO"); L.shadow = u("u_shadow"); L.shadowRaw = u("u_shadowRaw"); L.uvPerM = u("u_uvPerM"); L.shRange = u("u_shRange");
         L.hasTex = u("u_hasTex"); L.hasMR = u("u_hasMR"); L.hasN = u("u_hasN"); L.hasE = u("u_hasE"); L.hasO = u("u_hasO");
         L.alphaMode = u("u_alphaMode"); L.cutoff = u("u_cutoff"); L.metal = u("u_metal"); L.rough = u("u_rough"); L.nScale = u("u_nScale");
         L.emis = u("u_emis"); L.tint = u("u_tint"); L.useVC = u("u_useVC");
@@ -614,6 +644,14 @@ bool Renderer::init() {
         glDeleteFramebuffers(1, &shadowFbo_); glDeleteTextures(1, &shadowTex_);
         shadowFbo_ = shadowTex_ = 0;
     }
+    if (shadowTex_) {  // тот же буфер глубины без сравнения: для поиска перекрывающих
+        glGenSamplers(1, &rawSampler_);
+        glSamplerParameteri(rawSampler_, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        glSamplerParameteri(rawSampler_, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glSamplerParameteri(rawSampler_, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glSamplerParameteri(rawSampler_, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glSamplerParameteri(rawSampler_, GL_TEXTURE_COMPARE_MODE, GL_NONE);
+    }
     uint8_t white[4] = {255, 255, 255, 255};
     glGenTextures(1, &whiteTex_);
     glBindTexture(GL_TEXTURE_2D, whiteTex_);
@@ -640,6 +678,8 @@ void Renderer::release() {
     GLuint progs[] = {pbr_, depthP_, sky_, ssao_, blur_, down_, up_, tone_, fxaa_, acc_};
     for (GLuint p : progs) if (p) glDeleteProgram(p);
     pbr_ = depthP_ = sky_ = ssao_ = blur_ = down_ = up_ = tone_ = fxaa_ = acc_ = 0;
+    if (rawSampler_) glDeleteSamplers(1, &rawSampler_);
+    rawSampler_ = 0;
     if (shadowFbo_) glDeleteFramebuffers(1, &shadowFbo_);
     if (shadowTex_) glDeleteTextures(1, &shadowTex_);
     if (whiteTex_) glDeleteTextures(1, &whiteTex_);
@@ -892,6 +932,12 @@ void Renderer::scenePass(Scene& sc, TargetSet& s, const View& v, const Mat4& lig
     glUniform1i(L_.tex, 0); glUniform1i(L_.texMR, 1); glUniform1i(L_.texN, 2); glUniform1i(L_.texE, 3); glUniform1i(L_.texO, 4); glUniform1i(L_.shadow, 5);
     glActiveTexture(GL_TEXTURE5);
     glBindTexture(GL_TEXTURE_2D, shadowTex_ ? shadowTex_ : whiteTex_);
+    glActiveTexture(GL_TEXTURE6);
+    glBindTexture(GL_TEXTURE_2D, shadowTex_ ? shadowTex_ : whiteTex_);
+    if (rawSampler_) glBindSampler(6, rawSampler_);
+    glUniform1i(L_.shadowRaw, 6);
+    glUniform1f(L_.uvPerM, 1.f / (2.f * std::max(0.5f, sceneRadius_)));
+    glUniform1f(L_.shRange, std::max(0.5f, sceneRadius_) * 6.f);
     glActiveTexture(GL_TEXTURE0);
     glUniform1i(L_.nPl, fl.n);
     float pl[32], plc[24];
@@ -1054,6 +1100,11 @@ void Renderer::ssaoPass(TargetSet& s, const View& v, int pass, float strength) {
     glUniform1f(glGetUniformLocation(ssao_, "u_radius"), 0.6f);
     glUniform1f(glGetUniformLocation(ssao_, "u_pass"), (float)pass);
     glUniform1f(glGetUniformLocation(ssao_, "u_strength"), strength);
+    {
+        Vec3 sv = hasSun_ && contactOn_ ? normalize(transformDir(v.view, sunDir_)) : Vec3(0, 1, 0);
+        glUniform1f(glGetUniformLocation(ssao_, "u_contact"), hasSun_ && contactOn_ ? 1.f : 0.f);
+        glUniform3f(glGetUniformLocation(ssao_, "u_sunV"), sv.x, sv.y, sv.z);
+    }
     fullscreen();
     // размытие с учётом глубины
     glBindFramebuffer(GL_FRAMEBUFFER, s.ao[1].fbo);
@@ -1165,6 +1216,7 @@ void Renderer::renderView(Scene& sc, const View& v, GLuint targetFbo, RectI r, c
     int rw = std::max(4, (int)(r.w * scale)), rh = std::max(4, (int)(r.h * scale));
     FrameLights fl;
     gatherLights(sc, fl);
+    hasSun_ = fl.hasSun; sunDir_ = fl.sunDir; contactOn_ = sc.render.contactShadows;
     Mat4 lvp;
     bool sh = sc.render.shadows && fl.hasSun && shadowFbo_;
     if (sh) shadowPass(sc, fl, 0, lvp, 0.f);
@@ -1202,6 +1254,7 @@ bool Renderer::renderStill(Scene& sc, const View& v, int w, int h, int samples, 
     glClear(GL_COLOR_BUFFER_BIT);
     FrameLights fl;
     gatherLights(sc, fl);
+    hasSun_ = fl.hasSun; sunDir_ = fl.sunDir; contactOn_ = sc.render.contactShadows;
     bool sh = sc.render.shadows && fl.hasSun && shadowFbo_;
     auto halton = [](int i, int b) { float f = 1.f, r = 0.f; while (i > 0) { f /= b; r += f * (i % b); i /= b; } return r; };
     for (int i = 0; i < samples; i++) {

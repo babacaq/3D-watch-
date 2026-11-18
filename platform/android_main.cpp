@@ -195,7 +195,7 @@ void onWindowReady(Host& a) {
     if (!a.app->window) return;
     if (a.dpy == EGL_NO_DISPLAY && !initEgl(a)) { ENG_LOG("EGL init failed"); return; }
     if (!createSurface(a)) { ENG_LOG("surface failed"); return; }
-    a.density = queryDensity(a, a.w);
+    a.density = queryDensity(a, std::min(a.w, a.h));
     if (!a.papp.initGL(a.w, a.h, a.density)) {
         ENG_LOG("PrismLab initGL failed");
         a.papp.toast("Не удалось запустить OpenGL ES 3.0");
@@ -288,7 +288,7 @@ void android_main(android_app* app) {
         eglQuerySurface(a.dpy, a.surf, EGL_HEIGHT, &h);
         if (w > 0 && h > 0 && (w != a.w || h != a.h)) {
             a.w = w; a.h = h;
-            a.density = queryDensity(a, w);
+            a.density = queryDensity(a, std::min(w, h));
             a.papp.resize(w, h, a.density);
         }
         a.papp.frame(nowSec());

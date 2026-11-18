@@ -134,8 +134,19 @@ void Animator::evaluate(int clipA, float timeA, int clipB, float timeB, float w)
 }
 
 void Animator::computeMatrices() {
+    const Pose* P = &pose_;
+    Pose tmp;
+    if (!deltas.empty()) {
+        tmp = pose_;  // поправки не должны накапливаться между вызовами
+        for (const BoneDelta& d : deltas) {
+            if (d.node < 0 || d.node >= (int)tmp.r.size()) continue;
+            tmp.r[d.node] = normalize(d.r * tmp.r[d.node]);
+            tmp.t[d.node] = tmp.t[d.node] + d.t;
+        }
+        P = &tmp;
+    }
     for (int i : model_->order) {
-        Mat4 local = trs(pose_.t[i], pose_.r[i], pose_.s[i]);
+        Mat4 local = trs(P->t[i], P->r[i], P->s[i]);
         int p = model_->nodes[i].parent;
         world[i] = p >= 0 ? world[p] * local : local;
     }
