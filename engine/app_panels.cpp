@@ -23,7 +23,7 @@ static std::string boneName(const Model& m, int n) {
 
 // Поза кости на кадре. Если дорожки ещё не было, а кадр не первый, сначала ставим нулевую позу на первом кадре,
 // чтобы поза не «протекала» назад на всю анимацию.
-static void writeBonePose(Scene& sc, Object& o, int node, int frame, const Vec3& t, const Quat& r) {
+void writeBonePose(Scene& sc, Object& o, int node, int frame, const Vec3& t, const Quat& r) {
     bool has = false;
     for (auto& tr : o.boneTracks) if (tr.node == node && !tr.keys.empty()) has = true;
     if (!has && frame > sc.proj.frameStart) sc.setBoneKey(o.id, node, sc.proj.frameStart, Vec3(), Quat());
@@ -156,6 +156,10 @@ void App::panelBones(const Rect& r) {
             }
         }
     }
+    {
+        Rect gb = row(44);
+        if (ui.button(gb, "Экспорт анимации скелета (GLB)", 0, 14)) skeletalExportMenu();
+    }
     contentBones_ = form_.y - top + 24 * S;
     ui.endScroll();
 }
@@ -256,9 +260,114 @@ void App::panelPhysics(const Rect& r) {
             Rect b2 = row(42);
             if (ui.button(b2, "Выключить физику", 2, 13.5f)) { beginEdit(); ph.enabled = false; refresh(); editStarted_ = false; }
         }
+        panelSimExtras(*o);
     }
     contentPhys_ = form_.y - top + 24 * S;
     ui.endScroll();
+}
+
+// Рэгдолл по костям, инерция предмета на кости и ткань: общие переключатели и ползунки.
+void App::panelSimExtras(Object& o) {
+    int id = o.id;
+    int cf = curFrame();
+    auto refresh = [this]() { scene.resetEffects(); scene.evaluate((float)frameF_); scene.simulateTo(curFrame()); };
+    auto intSlider = [this, id](const std::string& label, int cur, float lo, float hi, std::function<void(Object&, int)> set) {
+        float v = (float)cur;
+        Rect line = row(38);
+        auto ap = [this, id, set, lo, hi](float nv) {
+            Object* ob = scene.find(id);
+            if (!ob) return;
+            beginEdit();
+            set(*ob, (int)std::lround(clampf(nv, lo, hi)));
+            scene.resetEffects(); scene.evaluate((float)frameF_); scene.simulateTo(curFrame());
+        };
+        if (slide(line, label, v, lo, hi, "%.0f", 0.2f, ap)) ap(v);
+    };
+
+    // ---------- рэгдолл ----------
+    sectionLabel("Рэгдолл: тело падает по костям");
+    {
+        bool rigged = scene.boneCount(o) >= 2;
+        if (!rigged) {
+            Rect hint = row(44);
+            ui.label(hint, "У этой модели нет скелета, рэгдолл недоступен. Для обычных предметов включите физику выше.", 11.5f, theme::textDim, 0);
+        } else {
+            RagdollProps& rg = o.rag;
+            Rect t = row(42);
+            bool v = rg.enabled;
+            if (ui.toggle(t, "Рэгдолл включён", v)) {
+                beginEdit();
+                rg.enabled = v;
+                if (v) rg.start = std::max(cf, scene.proj.frameStart);
+                refresh();
+                editStarted_ = false;
+            }
+            if (rg.enabled) {
+                Rect b = row(44);
+                if (ui.button(b, "Начать с текущего кадра (" + std::to_string(cf) + ")", 1, 13.5f)) { beginEdit(); rg.start = cf; refresh(); editStarted_ = false; }
+                intSlider("Кадр включения", rg.start, 0, 100000, [](Object& x, int n) { x.rag.start = n; });
+                propSim(o, "Масса тела, кг", [](Object& x) -> float& { return x.rag.mass; }, 5.f, 200.f, "%.0f", 0);
+                propSim(o, "Трение", [](Object& x) -> float& { return x.rag.friction; }, 0.f, 1.5f, "%.2f", 0);
+                propSim(o, "Упругость", [](Object& x) -> float& { return x.rag.bounce; }, 0.f, 0.8f, "%.2f", 0);
+                propSim(o, "Предел сгиба суставов, °", [](Object& x) -> float& { return x.rag.limit; }, 10.f, 150.f, "%.0f", 0);
+                propSim(o, "Толщина тела", [](Object& x) -> float& { return x.rag.thick; }, 0.4f, 2.5f, "%.2f", 0);
+                Rect tt = row(40);
+                bool inh = rg.inherit;
+                if (ui.toggle(tt, "Сохранить скорость анимации", inh)) { beginEdit(); rg.inherit = inh; refresh(); editStarted_ = false; }
+                propSim(o, "Толчок вперёд (Z), м/с", [](Object& x) -> float& { return x.rag.push.z; }, -20.f, 20.f, "%.1f", 0);
+                propSim(o, "Толчок вбок (X), м/с", [](Object& x) -> float& { return x.rag.push.x; }, -20.f, 20.f, "%.1f", 0);
+                propSim(o, "Толчок вверх (Y), м/с", [](Object& x) -> float& { return x.rag.push.y; }, -10.f, 20.f, "%.1f", 0);
+                Rect hint = row(54);
+                ui.label(hint, std::string(scene.ragdollBaked(id) ? "Расчёт готов: " : "Расчёт ещё не готов: ") + "до кадра включения тело идёт по анимации, затем падает и ложится на пол. Ключи костей после этого кадра не действуют.", 11, theme::textDim, 0);
+            }
+        }
+    }
+
+    // ---------- инерция предмета ----------
+    sectionLabel("Предмет качается (оружие на спине, сумка)");
+    {
+        SecondaryProps& sp = o.sec;
+        Rect t = row(42);
+        bool v = sp.enabled;
+        if (ui.toggle(t, "Инерция включена", v)) { beginEdit(); sp.enabled = v; refresh(); editStarted_ = false; }
+        if (sp.enabled) {
+            propSim(o, "Жёсткость крепления", [](Object& x) -> float& { return x.sec.stiffness; }, 4.f, 150.f, "%.0f", 0);
+            propSim(o, "Затухание", [](Object& x) -> float& { return x.sec.damping; }, 0.2f, 20.f, "%.1f", 0);
+            propSim(o, "Вес (провисание)", [](Object& x) -> float& { return x.sec.gravity; }, 0.f, 2.f, "%.2f", 0);
+            propSim(o, "Сила качания", [](Object& x) -> float& { return x.sec.amount; }, 0.f, 3.f, "%.2f", 0);
+        }
+        Rect hint = row(54);
+        ui.label(hint, "Сначала прицепите предмет к кости персонажа (вкладка «Объект» → «Прицепить»). Когда персонаж двигается, предмет запаздывает и качается.", 11, theme::textDim, 0);
+    }
+
+    // ---------- ткань ----------
+    sectionLabel("Ткань: волосы, плащ (меш без костей)");
+    {
+        std::string why;
+        if (!scene.clothSupported(o, &why)) {
+            Rect hint = row(54);
+            ui.label(hint, why.empty() ? "Для этой модели ткань недоступна." : why, 11.5f, theme::textDim, 0);
+        } else {
+            ClothProps& cl = o.cloth;
+            Rect t = row(42);
+            bool v = cl.enabled;
+            if (ui.toggle(t, "Ткань включена", v)) { beginEdit(); cl.enabled = v; refresh(); editStarted_ = false; }
+            if (cl.enabled) {
+                Rect seg = row(40);
+                int k = ui.segmented(seg, {"Закреплён верх", "Закреплён низ"}, cl.pinSide);
+                if (k >= 0 && k != cl.pinSide) { beginEdit(); cl.pinSide = k; refresh(); editStarted_ = false; }
+                propSim(o, "Закреплённая доля", [](Object& x) -> float& { return x.cloth.pin; }, 0.f, 0.8f, "%.2f", 0);
+                propSim(o, "Жёсткость ткани", [](Object& x) -> float& { return x.cloth.stiffness; }, 0.1f, 1.f, "%.2f", 0);
+                propSim(o, "Возврат к форме", [](Object& x) -> float& { return x.cloth.shape; }, 0.f, 1.f, "%.2f", 0);
+                propSim(o, "Затухание", [](Object& x) -> float& { return x.cloth.damping; }, 0.f, 0.3f, "%.3f", 0);
+                propSim(o, "Гравитация", [](Object& x) -> float& { return x.cloth.gravity; }, 0.f, 2.f, "%.2f", 0);
+                propSim(o, "Ветер, м/с", [](Object& x) -> float& { return x.cloth.wind; }, 0.f, 15.f, "%.1f", 0);
+                propSim(o, "Направление ветра, °", [](Object& x) -> float& { return x.cloth.windDir; }, 0.f, 360.f, "%.0f", 0);
+                Rect hint = row(54);
+                ui.label(hint, std::string(scene.clothBaked(id) ? "Расчёт готов. " : "Расчёт ещё не готов. ") + "Ткань считается по кадрам от начала проекта; выше закреплённый край остаётся на месте.", 11, theme::textDim, 0);
+            }
+        }
+    }
 }
 
 // ============================================================ панель «Эффекты»

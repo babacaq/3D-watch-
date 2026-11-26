@@ -12,10 +12,40 @@
 namespace eng {
 
 namespace theme {
-Col bg = Col::hex(0x0B0A1A), panel = Col::hex(0x14122A), panel2 = Col::hex(0x1B1938), widget = Col::hex(0x2A2752),
-    widgetHot = Col::hex(0x3B3777), accent = Col::hex(0x8B5CF6), accent2 = Col::hex(0x38BDF8), text = Col::hex(0xEDEBFF),
-    textDim = Col::hex(0x9A96C4), danger = Col::hex(0xEF4468), ok = Col::hex(0x34D399), keyCol = Col::hex(0xFFC83D),
-    line = Col::hex(0x2F2C5A), orange = Col::hex(0xFF8C1A);
+Col bg, panel, panel2, widget, widgetHot, accent, accent2, text, textDim, danger, ok, keyCol, line, orange;
+Col onAccent, accentEnd, overlay, shade, popup, homeTop, thumb;
+static int cur = 0;
+const char* name(int id) {
+    static const char* n[kCount] = {"Чёрная", "Белая", "GTA 6"};
+    return n[id < 0 || id >= kCount ? 0 : id];
+}
+bool gradient() { return cur == 2; }
+void apply(int id) {
+    if (id < 0 || id >= kCount) id = 0;
+    cur = id;
+    if (id == 0) {  // нейтральный графит и оранжевый акцент, без фиолетового
+        bg = Col::hex(0x0A0A0B); panel = Col::hex(0x141416); panel2 = Col::hex(0x1C1C1F); widget = Col::hex(0x2A2A2E); widgetHot = Col::hex(0x3A3A40);
+        accent = Col::hex(0xFF7A1A); accent2 = Col::hex(0x4DB8FF); text = Col::hex(0xF2F2F2); textDim = Col::hex(0x9A9AA2);
+        danger = Col::hex(0xE5484D); ok = Col::hex(0x3DD68C); keyCol = Col::hex(0xFFC83D); line = Col::hex(0x2E2E33); orange = Col::hex(0xFFB020);
+        onAccent = Col::hex(0x141414); accentEnd = accent; overlay = Col(0.04f, 0.04f, 0.045f, 0.62f); shade = Col(0, 0, 0, 0.7f);
+        popup = Col(0.06f, 0.06f, 0.07f, 0.92f); homeTop = Col::hex(0x161618); thumb = Col::hex(0x1E1E21);
+    } else if (id == 1) {
+        bg = Col::hex(0xEDEDF0); panel = Col::hex(0xFFFFFF); panel2 = Col::hex(0xF5F5F7); widget = Col::hex(0xE3E3E8); widgetHot = Col::hex(0xD2D2DA);
+        accent = Col::hex(0x1F6FEB); accent2 = Col::hex(0x0B6BC9); text = Col::hex(0x16161A); textDim = Col::hex(0x666672);
+        danger = Col::hex(0xD92D4A); ok = Col::hex(0x138A5B); keyCol = Col::hex(0xE09A00); line = Col::hex(0xD6D6DD); orange = Col::hex(0xE8710A);
+        onAccent = Col::hex(0xFFFFFF); accentEnd = accent; overlay = Col(1, 1, 1, 0.78f); shade = Col(0.1f, 0.1f, 0.14f, 0.45f);
+        popup = Col(1, 1, 1, 0.96f); homeTop = Col::hex(0xFFFFFF); thumb = Col::hex(0xE0E0E6);
+    } else {  // закат Вайс-Сити: ночной фиолет, розовый и оранжевый, бирюзовые акценты
+        bg = Col::hex(0x0D0714); panel = Col::hex(0x170C24); panel2 = Col::hex(0x20112F); widget = Col::hex(0x2E1A44); widgetHot = Col::hex(0x44275F);
+        accent = Col::hex(0xFF3E8A); accent2 = Col::hex(0x2DE2E6); text = Col::hex(0xFFF3E8); textDim = Col::hex(0xB59ACB);
+        danger = Col::hex(0xFF4D4D); ok = Col::hex(0x4DF0A8); keyCol = Col::hex(0xFFD23D); line = Col::hex(0x4A2A63); orange = Col::hex(0xFFA13D);
+        onAccent = Col::hex(0xFFFFFF); accentEnd = Col::hex(0xFF9B3D); overlay = Col(0.07f, 0.03f, 0.12f, 0.66f); shade = Col(0.03f, 0.0f, 0.06f, 0.74f);
+        popup = Col(0.09f, 0.04f, 0.15f, 0.95f); homeTop = Col::hex(0x3A1250); thumb = Col::hex(0x2A1740);
+    }
+}
+namespace {
+const bool kThemeInit = (apply(0), true);
+}
 }  // namespace theme
 
 #include "font_data.inc"
@@ -464,11 +494,12 @@ bool UI::button(const Rect& r, const std::string& label, int style, float fontDp
     bool pr = !blocked && down_ && pressedId_ == id && !moved_ && r.has(px_, py_);
     Col bg = theme::widget;
     Col tc = theme::text;
-    if (style == 1) bg = theme::accent;
-    else if (style == 2) bg = theme::danger.alpha(0.85f);
+    if (style == 1) { bg = theme::accent; tc = theme::onAccent; }
+    else if (style == 2) { bg = theme::danger.alpha(0.9f); tc = Col(1, 1, 1, 1); }
     else if (style == 3) { bg = Col(0, 0, 0, 0); tc = theme::textDim; }
     if (pr) bg = style == 3 ? theme::widget : bg.mix(Col(1, 1, 1, 1), 0.18f);
-    g.rect(r, bg, dp(8));
+    if (style == 1 && theme::gradient() && !pr) g.rectGrad(r, theme::accent, theme::accentEnd, dp(8));
+    else g.rect(r, bg, dp(8));
     float fs = dp(fontDp);
     g.textIn(r, g.fit(label, fs, r.w - dp(8)), fs, tc, 1);
     return tapOn(id, r);
@@ -481,7 +512,7 @@ bool UI::iconBtn(const Rect& r, Icon ic, bool active, const Col* tint, bool fill
     Col bg = active ? theme::accent : theme::widget;
     if (pr) bg = bg.mix(Col(1, 1, 1, 1), 0.2f);
     if (filled) g.rect(r, bg, dp(8)); else if (pr || active) g.rect(r, bg.alpha(0.5f), dp(8));
-    Col c = tint ? *tint : (active ? Col(1, 1, 1, 1) : theme::text);
+    Col c = tint ? *tint : (active && filled ? theme::onAccent : theme::text);
     g.icon(ic, r.inset(std::min(r.w, r.h) * 0.2f), c);
     return tapOn(id, r);
 }
@@ -501,9 +532,37 @@ bool UI::iconLabelBtn(const Rect& r, Icon ic, const std::string& label, bool act
     return tapOn(id, r);
 }
 
+// Однострочная подпись обрезается «…»; если строка не помещается, а рамка высотой хотя бы в две строки — переносится по словам.
 void UI::label(const Rect& r, const std::string& s, float fontDp, const Col& c, int align) {
     float fs = dp(fontDp);
-    g.textIn(r, g.fit(s, fs, r.w), fs, c, align);
+    float lh = fs * 1.32f;
+    if (g.textWidth(s, fs) <= r.w || r.h < lh * 1.7f) {
+        g.textIn(r, g.fit(s, fs, r.w), fs, c, align);
+        return;
+    }
+    std::vector<std::string> lines;
+    std::string cur;
+    size_t i = 0;
+    while (i < s.size()) {
+        size_t j = s.find(' ', i);
+        std::string word = s.substr(i, j == std::string::npos ? std::string::npos : j - i);
+        i = j == std::string::npos ? s.size() : j + 1;
+        std::string t = cur.empty() ? word : cur + " " + word;
+        if (!cur.empty() && g.textWidth(t, fs) > r.w) { lines.push_back(cur); cur = word; }
+        else cur = t;
+    }
+    if (!cur.empty()) lines.push_back(cur);
+    int maxLines = std::max(1, (int)std::floor(r.h / lh + 0.2f));
+    if ((int)lines.size() > maxLines) {
+        lines.resize((size_t)maxLines);
+        lines.back() = g.fit(lines.back() + " …", fs, r.w);
+    }
+    float y0 = r.y + (r.h - lh * lines.size()) * 0.5f;
+    if (align == 0) y0 = r.y;
+    for (size_t k = 0; k < lines.size(); k++) {
+        Rect lr(r.x, y0 + lh * k, r.w, lh);
+        g.textIn(lr, g.fit(lines[k], fs, r.w), fs, c, align);
+    }
 }
 
 bool UI::toggle(const Rect& r, const std::string& label, bool& v) {
@@ -514,7 +573,7 @@ bool UI::toggle(const Rect& r, const std::string& label, bool& v) {
     g.textIn(Rect(r.x, r.y, r.w - dp(56), r.h), g.fit(label, fs, r.w - dp(64)), fs, theme::text, 0);
     Rect sw(r.r() - dp(48), r.cy() - dp(13), dp(48), dp(26));
     g.rect(sw, v ? theme::accent : theme::widget, dp(13));
-    g.circle(v ? sw.r() - dp(13) : sw.x + dp(13), sw.cy(), dp(10), Col(1, 1, 1, 1));
+    g.circle(v ? sw.r() - dp(13) : sw.x + dp(13), sw.cy(), dp(10), v ? theme::onAccent : theme::text.alpha(0.85f));
     if (tapOn(id, r)) { v = !v; return true; }
     return false;
 }
@@ -566,7 +625,7 @@ int UI::segmented(const Rect& r, const std::vector<std::string>& items, int sel)
         if (record) rects.emplace(items[i], c);
         if (i == sel) g.rect(c.inset(dp(2)), theme::accent, dp(7));
         float fs = dp(12.5f);
-        g.textIn(c, g.fit(items[i], fs, w - dp(6)), fs, i == sel ? Col(1, 1, 1, 1) : theme::textDim, 1);
+        g.textIn(c, g.fit(items[i], fs, w - dp(6)), fs, i == sel ? theme::onAccent : theme::textDim, 1);
         if (tapOn(id, c)) res = i;
     }
     return res;

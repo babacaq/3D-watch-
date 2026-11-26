@@ -49,8 +49,11 @@ struct MeshData {
     int texOcclusion = -1; // R
     std::string name;
     GLuint vao = 0, vbo = 0, ibo = 0;
+    bool dynamic = false;  // вершины меняются каждый кадр (ткань): буфер GL_DYNAMIC_DRAW
+    bool stale = false;    // вершины на CPU новее, чем в GL-буфере
 
     void upload();
+    void updateVerts();    // залить вершины в GL-буфер, если они изменились
     void release();
     void draw() const;
     size_t triangles() const { return indices.size() / 3; }

@@ -86,8 +86,10 @@ public:
     void applyImpulse(int id, Vec3 impulse, Vec3 worldPoint);
     void explosion(Vec3 center, float radius, float impulse);
 
-    int addBallJoint(int bodyA, int bodyB /* -1 = world anchor */, Vec3 worldAnchor);
+    // coneLimit > 0: предельный угол (рад) поворота тела A относительно B от исходного взаимного положения
+    int addBallJoint(int bodyA, int bodyB /* -1 = world anchor */, Vec3 worldAnchor, float coneLimit = -1.f);
     void clearJoints();
+    void ignorePair(int bodyA, int bodyB);  // эта пара тел не сталкивается (соседние кости рэгдолла)
 
     bool raycast(Vec3 origin, Vec3 dir, float maxT, RayHit& hit) const;
 

@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace eng {
 namespace {
@@ -272,7 +273,7 @@ struct Contact {
     float mn = 0, mt1 = 0, mt2 = 0, bias = 0, jn = 0, j1 = 0, j2 = 0, approach = 0, mu = 0.5f;
 };
 
-struct JointX { int a, b; Vec3 la, lb, anchorW; Vec3 impulse; };
+struct JointX { int a, b; Vec3 la, lb, anchorW; Vec3 impulse; float limit = -1.f; Quat rel0; };
 
 }  // namespace
 
@@ -296,7 +297,9 @@ struct PhysicsWorld::Impl {
     std::vector<Contact> contacts, prev;
     std::vector<ContactEvent> events;
     std::vector<JointX> joints;
+    std::unordered_set<uint64_t> ignored;
     int lastContactCount = 0;
+    static uint64_t pairKey(int a, int b) { if (a > b) std::swap(a, b); return ((uint64_t)(uint32_t)a << 32) | (uint32_t)b; }
 
     static uint64_t key(int x, int y, int z) {
         return ((uint64_t)(uint32_t)(x + 100000) << 42) ^ ((uint64_t)(uint32_t)(y + 100000) << 21) ^ (uint64_t)(uint32_t)(z + 100000);
@@ -498,6 +501,7 @@ struct PhysicsWorld::Impl {
     }
 
     void collidePair(int i, int j) {
+        if (!ignored.empty() && ignored.count(pairKey(i, j))) return;
         Body &A = bodies[i], &B = bodies[j];
         if (A.shape == ShapeType::Sphere && B.shape == ShapeType::Sphere) {
             Vec3 d = A.pos - B.pos;
@@ -635,6 +639,28 @@ struct PhysicsWorld::Impl {
         Body& A = bodies[j.a];
         A.vel += imp * invM(j.a); A.angVel += applyInvI(j.a, cross(ra, imp));
         if (j.b >= 0) { Body& B = bodies[j.b]; B.vel += imp * -invM(j.b); B.angVel += applyInvI(j.b, cross(rb, -imp)); }
+        if (j.limit > 0 && j.b >= 0) solveLimit(j, h);
+    }
+    // Ограничение угла сустава: поворот A относительно B не дальше j.limit от исходного положения.
+    void solveLimit(JointX& j, float h) {
+        const Quat& qa = bodies[j.a].rot;
+        const Quat& qb = bodies[j.b].rot;
+        Quat err = conj(qb) * qa * conj(j.rel0);
+        if (err.w < 0) err = Quat(-err.x, -err.y, -err.z, -err.w);
+        float s = std::sqrt(err.x * err.x + err.y * err.y + err.z * err.z);
+        if (s < 1e-6f) return;
+        float ang = 2.f * std::atan2(s, err.w);
+        if (ang <= j.limit) return;
+        Vec3 axis = rotate(qb, Vec3(err.x / s, err.y / s, err.z / s));
+        float wrel = dot(bodies[j.a].angVel - bodies[j.b].angVel, axis);
+        float want = -kBeta * (ang - j.limit) / h;
+        float dw = want - wrel;
+        if (wrel < want) return;  // уже возвращается быстрее нужного
+        float k = dot(axis, applyInvI(j.a, axis)) + dot(axis, applyInvI(j.b, axis));
+        if (k < 1e-9f) return;
+        Vec3 L = axis * (dw / k);
+        bodies[j.a].angVel += applyInvI(j.a, L);
+        bodies[j.b].angVel -= applyInvI(j.b, L);
     }
 
     // ---- непрерывные столкновения: шагаем по траектории, останавливаемся на первом касании ----
@@ -779,7 +805,7 @@ void PhysicsWorld::removeBody(int id) {
     js.erase(std::remove_if(js.begin(), js.end(), [&](const JointX& j) { return j.a == id || j.b == id; }), js.end());
 }
 void PhysicsWorld::clearBodies() {
-    impl_->bodies.clear(); impl_->ext.clear(); impl_->freeIds.clear(); impl_->joints.clear();
+    impl_->bodies.clear(); impl_->ext.clear(); impl_->freeIds.clear(); impl_->joints.clear(); impl_->ignored.clear();
     impl_->contacts.clear(); impl_->prev.clear();
 }
 int PhysicsWorld::addStaticBox(Vec3 pos, Quat rot, Vec3 half) {
@@ -851,7 +877,7 @@ void PhysicsWorld::explosion(Vec3 c, float radius, float impulse) {
         applyImpulse(i, dir * (impulse * f * f), b.pos + side * (0.4f * size));
     }
 }
-int PhysicsWorld::addBallJoint(int a, int b, Vec3 anchor) {
+int PhysicsWorld::addBallJoint(int a, int b, Vec3 anchor, float coneLimit) {
     Impl& m = *impl_;
     if (a < 0 || a >= (int)m.bodies.size() || !m.bodies[a].alive) return -1;
     if (b >= (int)m.bodies.size() || (b >= 0 && !m.bodies[b].alive)) return -1;
@@ -859,10 +885,13 @@ int PhysicsWorld::addBallJoint(int a, int b, Vec3 anchor) {
     j.a = a; j.b = b; j.anchorW = anchor;
     j.la = rotate(conj(m.bodies[a].rot), anchor - m.bodies[a].pos);
     j.lb = b >= 0 ? rotate(conj(m.bodies[b].rot), anchor - m.bodies[b].pos) : anchor;
+    j.limit = coneLimit;
+    if (b >= 0) j.rel0 = conj(m.bodies[b].rot) * m.bodies[a].rot;
     m.joints.push_back(j);
     return (int)m.joints.size() - 1;
 }
 void PhysicsWorld::clearJoints() { impl_->joints.clear(); }
+void PhysicsWorld::ignorePair(int a, int b) { impl_->ignored.insert(Impl::pairKey(a, b)); }
 void PhysicsWorld::wakeAll() { for (int i = 0; i < (int)impl_->bodies.size(); i++) impl_->wake(i); }
 void PhysicsWorld::wakeBody(int id) { impl_->wake(id); }
 

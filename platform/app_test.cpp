@@ -1,5 +1,6 @@
 // Десктопный тест приложения PrismLab: EGL surfaceless + симуляция касаний, скриншоты в PPM.
 #include <cstdio>
+#include <dirent.h>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -53,6 +54,11 @@ int main(int argc, char** argv) {
     app.plat.savePng = [&](const std::string& name, const std::vector<uint8_t>& png) {
         std::ofstream f(out + "/" + name, std::ios::binary);
         f.write((const char*)png.data(), (std::streamsize)png.size());
+        return true;
+    };
+    app.plat.saveFile = [&](const std::string& name, const std::vector<uint8_t>& data, const std::string&) {
+        std::ofstream f(out + "/" + name, std::ios::binary);
+        f.write((const char*)data.data(), (std::streamsize)data.size());
         return true;
     };
     app.plat.toast = [](const std::string& s) { printf("toast: %s\n", s.c_str()); };
@@ -257,7 +263,11 @@ int main(int argc, char** argv) {
             app.boneXY(nb, x0, y0);
             Mat4 w0 = sc.find(mid)->anim->world[nb];
             size_t tracks0 = sc.find(mid)->boneTracks.size();
+            Vec3 objT0 = sc.find(mid)->t;
+            size_t objKeys0 = sc.find(mid)->keys.size();
             drag(x0, y0, x0 + 60 * S, y0 + 20 * S, 10);
+            CHECK(length(sc.find(mid)->t - objT0) < 1e-5f && sc.find(mid)->keys.size() == objKeys0, "dragging a bone does not move the whole body");
+            CHECK(app.selectedBone() == nb, "bone stays selected after drag");
             CHECK(sc.find(mid)->boneTracks.size() > tracks0, "bone track created");
             bool keyHere = sc.boneHasKey(*sc.find(mid), nb, 10);
             CHECK(keyHere, "bone key at frame 10");
@@ -302,6 +312,58 @@ int main(int argc, char** argv) {
         CHECK(sc.find(sc.selected)->fx == FxKind::Blood, "blood added");
         run(3);
         shot("18_fx_blood");
+    }
+    // --- рэгдолл, инерция и ткань: панель физики модели
+    {
+        sc.selected = mid;
+        app.selectBone(-1);
+        app.setTab(Tab::Physics); run(4);
+        shot("14b_physics_model");
+        CHECK(reveal("Рэгдолл включён"), "ragdoll toggle reachable");
+        tapW("Рэгдолл включён"); run(3);
+        CHECK(sc.find(mid)->rag.enabled, "ragdoll enabled by toggle");
+        shot("14c_ragdoll_on");
+        tapW("Рэгдолл включён"); run(3);
+        CHECK(!sc.find(mid)->rag.enabled, "ragdoll disabled by toggle");
+    }
+    // --- экспорт скелетной анимации (GLB) через приложение
+    {
+        sc.selected = mid;
+        size_t before = 0;
+        { std::ifstream f(out + "/x"); (void)f; (void)before; }
+        app.exportSkeletalAnimation(0); run(2);
+        bool found = false;
+        DIR* d = opendir(out.c_str());
+        while (d) { dirent* e = readdir(d); if (!e) break; std::string n = e->d_name; if (n.size() > 4 && n.substr(n.size() - 4) == ".glb") found = true; }
+        if (d) closedir(d);
+        CHECK(found, "GLB saved via platform");
+    }
+    // --- настройки и темы
+    {
+        app.setTab(Tab::None);
+        app.openSettings(); run(4);
+        CHECK(app.settingsOpen(), "settings open");
+        shot("20_settings_black");
+        app.setTheme(1); run(3);
+        shot("21_settings_white");
+        app.settingsOpen() ? app.closeSettings() : (void)0; run(3);
+        shot("22_editor_white");
+        app.setTheme(2); run(3);
+        shot("23_editor_gta");
+        app.setTab(Tab::Bones); run(3);
+        shot("24_bones_gta");
+        app.setTab(Tab::Physics); run(3);
+        shot("25_physics_gta");
+        app.openSettings(); run(3);
+        shot("26_settings_gta");
+        app.closeSettings(); run(2);
+        app.setTheme(0); run(2);
+        // настройки сохраняются в файл и читаются обратно
+        app.settings.uiScale = 1.15f; app.settings.invertY = true; app.saveSettings();
+        app.settings = Settings();
+        app.loadSettings();
+        CHECK(std::fabs(app.settings.uiScale - 1.15f) < 1e-4f && app.settings.invertY, "settings round trip");
+        app.settings.uiScale = 1.f; app.settings.invertY = false; app.saveSettings(); app.loadSettings();
     }
     // --- домой и обратно
     app.goHome(); run(4);

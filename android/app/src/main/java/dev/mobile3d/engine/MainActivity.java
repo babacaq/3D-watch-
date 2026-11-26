@@ -90,6 +90,31 @@ public class MainActivity extends NativeActivity {
         }
     }
 
+    /** Из C++: сохранить любой файл (GLB и т.п.) в Загрузки/PrismLab. */
+    public boolean saveFile(String name, byte[] data, String mime) {
+        try {
+            ContentResolver cr = getContentResolver();
+            ContentValues cv = new ContentValues();
+            cv.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+            cv.put(MediaStore.MediaColumns.MIME_TYPE, mime);
+            cv.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/PrismLab");
+            cv.put(MediaStore.MediaColumns.IS_PENDING, 1);
+            Uri uri = cr.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv);
+            if (uri == null) return false;
+            try (OutputStream os = cr.openOutputStream(uri)) {
+                if (os == null) return false;
+                os.write(data);
+            }
+            ContentValues done = new ContentValues();
+            done.put(MediaStore.MediaColumns.IS_PENDING, 0);
+            cr.update(uri, done, null, null);
+            return true;
+        } catch (Throwable e) {
+            android.util.Log.e("PrismLab", "save file failed", e);
+            return false;
+        }
+    }
+
     public boolean videoBegin(int w, int h, int fps, int mbps, String name) { return video.begin(w, h, fps, mbps, name); }
     public boolean videoFrame(java.nio.ByteBuffer rgba, int w, int h, int index) { return video.frame(rgba, w, h, index); }
     public boolean videoEnd() { return video.end(); }

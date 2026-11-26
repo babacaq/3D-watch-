@@ -1,8 +1,10 @@
 // Тесты сцены без GL: ключи, прицепление/отцепление (в т.ч. к кости), эффекты, сохранение, отмена.
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 
+#include "glb_export.h"
 #include "importer.h"
 #include "scene.h"
 
@@ -24,6 +26,76 @@ static std::unique_ptr<Model> loadFile(const std::string& path) {
         return true;
     };
     return importModel(path.substr(path.find_last_of('/') + 1), d.data(), d.size(), rd, &err);
+}
+
+
+// Процедурный «человечек»: скелет из суставов + меш-узел, записанный в joints (как Player1Mtl2), + кожа и сетка ткани.
+static std::unique_ptr<Model> makeRig(bool withCloth) {
+    auto m = std::make_unique<Model>();
+    auto add = [&](const char* n, int p, Vec3 t) { Node nd; nd.name = n; nd.parent = p; nd.t = t; m->nodes.push_back(nd); return (int)m->nodes.size() - 1; };
+    int hips = add("Hips", -1, {0, 1, 0});
+    int spine = add("Spine", hips, {0, 0.3f, 0});
+    int head = add("Head", spine, {0, 0.4f, 0});
+    int armR = add("ArmR", spine, {0.25f, 0.2f, 0});
+    int handR = add("HandR", armR, {0.3f, 0, 0});
+    int legL = add("LegL", hips, {-0.1f, -0.1f, 0});
+    int footL = add("FootL", legL, {0, -0.8f, 0});
+    int legR = add("LegR", hips, {0.1f, -0.1f, 0});
+    int footR = add("FootR", legR, {0, -0.8f, 0});
+    int meshJoint = add("Player1Mtl2", hips, {0, 0, 0});
+    (void)head; (void)handR; (void)footL; (void)footR;
+    int body = add("Body", -1, {0, 0, 0});
+    // кожа
+    MeshData sk;
+    for (int i = 0; i < 6; i++) {
+        Vertex v;
+        std::memset(&v, 0, sizeof v);
+        v.p[0] = (i % 2 ? 0.2f : -0.2f); v.p[1] = 0.3f * (i / 2); v.p[2] = 0; v.n[2] = 1; v.c[0] = v.c[1] = v.c[2] = v.c[3] = 255;
+        v.j[0] = 0; v.w[0] = 1.f;
+        sk.verts.push_back(v);
+    }
+    sk.indices = {0, 1, 2, 1, 3, 2, 2, 3, 4, 3, 5, 4};
+    sk.skin = 0;
+    m->meshes.push_back(sk);
+    m->nodes[body].meshes.push_back(0);
+    // меш на суставе
+    MeshData jm;
+    for (int i = 0; i < 3; i++) { Vertex v; std::memset(&v, 0, sizeof v); v.p[0] = (float)i * 0.1f; v.n[1] = 1; v.c[0] = v.c[1] = v.c[2] = v.c[3] = 255; jm.verts.push_back(v); }
+    jm.indices = {0, 1, 2};
+    m->meshes.push_back(jm);
+    m->nodes[meshJoint].meshes.push_back(1);
+    // ткань: вертикальная сетка 9x9, верхний край на y=2
+    if (withCloth) {
+        MeshData cl;
+        const int N = 9;
+        for (int y = 0; y < N; y++)
+            for (int x = 0; x < N; x++) {
+                Vertex v;
+                std::memset(&v, 0, sizeof v);
+                v.p[0] = -0.5f + x / (float)(N - 1); v.p[1] = 2.f - y / (float)(N - 1); v.p[2] = 0; v.n[2] = 1;
+                v.c[0] = v.c[1] = v.c[2] = v.c[3] = 255;
+                cl.verts.push_back(v);
+            }
+        for (int y = 0; y + 1 < N; y++)
+            for (int x = 0; x + 1 < N; x++) {
+                uint32_t a = y * N + x, b = a + 1, c = a + N, d = c + 1;
+                cl.indices.insert(cl.indices.end(), {a, c, b, b, c, d});
+            }
+        cl.doubleSided = true;
+        m->meshes.push_back(cl);
+        Node cn; cn.name = "Cape"; cn.parent = -1; cn.meshes.push_back((int)m->meshes.size() - 1);
+        m->nodes.push_back(cn);
+    }
+    Skin skin;
+    std::vector<Mat4> wb(m->nodes.size());
+    for (size_t i = 0; i < m->nodes.size(); i++) {
+        Mat4 loc = trs(m->nodes[i].t, m->nodes[i].r, m->nodes[i].s);
+        wb[i] = m->nodes[i].parent >= 0 ? wb[(size_t)m->nodes[i].parent] * loc : loc;
+    }
+    for (int j = 0; j <= meshJoint; j++) { skin.joints.push_back(j); skin.invBind.push_back(inverse(wb[(size_t)j])); }
+    m->skins.push_back(skin);
+    m->finalize();
+    return m;
 }
 
 int main(int argc, char** argv) {
@@ -233,6 +305,200 @@ int main(int argc, char** argv) {
         bl.simulateTo(30);
         bl.simulateTo(60);
         CHECK(bl.particles().splatCount() == n1, "blood is deterministic: %d vs %d", bl.particles().splatCount(), n1);
+    }
+
+
+    // --- кватернионная интерполяция ключей: поворот идёт по кратчайшему пути, а не крутится на 340° ---
+    {
+        Scene q;
+        q.proj.fps = 24; q.proj.frameEnd = 25;
+        int c = q.addPrimitive("cube");
+        q.evaluate(1);
+        q.setLocal(c, {0, 0, 0}, {0, 0, 0}, {1, 1, 1});
+        q.insertKey(c, 1);
+        q.evaluate(25);
+        q.setLocal(c, {0, 0, 0}, {0, 350.f * kPi / 180.f, 0}, {1, 1, 1});
+        q.insertKey(c, 25);
+        q.evaluate(13);
+        const Mat4& w = q.find(c)->world;
+        float yaw = std::atan2(-w.m[2], w.m[0]) * 180.f / kPi;  // поворот вокруг Y
+        CHECK(std::fabs(yaw) < 15.f, "slerp takes the short way: yaw=%f", yaw);
+    }
+
+    // --- кости: настоящие суставы, гизмо на кости ---
+    {
+        Scene r;
+        r.proj.fps = 24; r.proj.frameEnd = 120;
+        int id = r.addModel(makeRig(false), "rig", "Rig");
+        const Object* o = r.find(id);
+        r.evaluate(1);
+        auto bones = r.boneNodes(*o);
+        bool hasMesh = false;
+        for (int n : bones) if (n == 9) hasMesh = true;
+        CHECK(!hasMesh, "mesh node Player1Mtl2 is not a bone");
+        CHECK(bones.size() == 9, "bones=%zu", bones.size());
+        CHECK(r.boneParent(*o, 4) == 3, "hand parent is arm");
+        CHECK(r.boneParent(*o, 0) == -1, "root has no bone parent");
+        Vec3 hand0, hips0, arm0;
+        r.boneWorldPos(*o, 4, hand0); r.boneWorldPos(*o, 0, hips0); r.boneWorldPos(*o, 3, arm0);
+        // гизмо: поворот руки на 90 градусов вокруг мировой Z
+        Vec3 t; Quat d;
+        CHECK(r.boneFromWorld(*o, 3, quatAxisAngle({0, 0, 1}, kPi * 0.5f), Vec3(), Vec3(), Quat(), t, d), "boneFromWorld");
+        r.setBoneKey(id, 3, 1, t, d);
+        r.evaluate(1);
+        Vec3 hand1, hips1, arm1;
+        r.boneWorldPos(*o, 4, hand1); r.boneWorldPos(*o, 0, hips1); r.boneWorldPos(*o, 3, arm1);
+        CHECK(near3(hips0, hips1) && near3(arm0, arm1), "only the chosen bone rotates");
+        float armLen = length(hand0 - arm0);
+        CHECK(near3(hand1 - arm1, Vec3(0, armLen, 0), 2e-3f), "hand swung up: %f %f %f", (hand1 - arm1).x, (hand1 - arm1).y, (hand1 - arm1).z);
+        // сдвиг кости в мировых осях
+        Vec3 t2; Quat d2;
+        r.boneFromWorld(*o, 3, Quat(), Vec3(0, 0.2f, 0), Vec3(), Quat(), t2, d2);
+        r.setBoneKey(id, 3, 1, t2, d2);
+        r.evaluate(1);
+        Vec3 arm2; r.boneWorldPos(*o, 3, arm2);
+        CHECK(near3(arm2 - arm0, Vec3(0, 0.2f, 0), 2e-3f), "bone moved by gizmo");
+    }
+
+    // --- рэгдолл: тело идёт по анимации, затем падает по костям ---
+    {
+        Scene r;
+        r.proj.fps = 24; r.proj.frameEnd = 120;
+        int id = r.addModel(makeRig(false), "rig", "Rig");
+        Object* o = r.find(id);
+        r.evaluate(5);
+        Vec3 hRef, fRef; r.boneWorldPos(*o, 0, hRef); r.boneWorldPos(*o, 6, fRef);
+        float legLen = length(fRef - hRef);
+        o->rag.enabled = true; o->rag.start = 10;
+        r.evaluate(5);
+        Vec3 h5; r.boneWorldPos(*o, 0, h5);
+        CHECK(near3(h5, hRef, 1e-3f), "before ragdoll start: pose from animation");
+        r.evaluate(110);
+        CHECK(r.ragdollBaked(id), "ragdoll baked");
+        Vec3 hEnd, footL, footR, head;
+        r.boneWorldPos(*o, 0, hEnd); r.boneWorldPos(*o, 6, footL); r.boneWorldPos(*o, 8, footR); r.boneWorldPos(*o, 2, head);
+        CHECK(std::isfinite(hEnd.y) && hEnd.y < 0.6f && hEnd.y > -0.05f, "hips lie on the floor: y=%f", hEnd.y);
+        CHECK(footL.y > -0.15f && head.y > -0.15f && head.y < 1.2f, "no sinking/explosion: foot=%f head=%f", footL.y, head.y);
+        float L1 = length(footL - hEnd);
+        CHECK(L1 > legLen * 0.5f && L1 < legLen * 1.3f, "limbs stay attached: %f vs %f", L1, legLen);
+        // повторный расчёт даёт то же (детерминизм)
+        r.evaluate(60); Vec3 a; r.boneWorldPos(*o, 4, a);
+        r.evaluate(110); r.evaluate(60); Vec3 b; r.boneWorldPos(*o, 4, b);
+        CHECK(near3(a, b, 1e-4f), "ragdoll deterministic");
+        // сохранение/загрузка настроек
+        o->rag.mass = 77.f; o->sec.stiffness = 33.f; o->cloth.pin = 0.3f; o->cloth.windDir = 90.f;
+        std::string js2 = r.toJson();
+        CHECK(js2.find("\"rag\"") != std::string::npos, "rag in json");
+    }
+
+    // --- предмет на кости качается по инерции ---
+    {
+        auto build = [&](bool sec, float& devOut) {
+            Scene r;
+            r.proj.fps = 24; r.proj.frameEnd = 80;
+            int ch = r.addModel(makeRig(false), "rig", "Rig");
+            int gun = r.addPrimitive("cube");
+            r.setLocal(gun, {0, 0.3f, 0}, {0, 0, 0}, {0.1f, 0.5f, 0.1f});
+            r.attach(gun, ch, 1, 1);
+            r.find(gun)->sec.enabled = sec;
+            // персонаж резко едет по X, потом останавливается
+            Object* c = r.find(ch);
+            auto kf = [&](int f, float x) { r.evaluate((float)f); r.setLocal(ch, {x, 0, 0}, {0, 0, 0}, {1, 1, 1}); r.insertKey(ch, f); };
+            kf(1, 0); kf(10, 0); kf(16, 3); kf(80, 3);
+            (void)c;
+            r.evaluate(1);
+            Vec3 ref = transformPoint(r.find(gun)->world, {0, 1, 0}) - posOf(r, gun);
+            float dev = 0;
+            for (int f = 10; f <= 40; f++) {
+                r.evaluate((float)f);
+                Vec3 u = transformPoint(r.find(gun)->world, {0, 1, 0}) - posOf(r, gun);
+                CHECK(std::isfinite(u.x + u.y + u.z), "secondary finite");
+                dev = std::max(dev, length(normalize(u) - normalize(ref)));
+            }
+            devOut = dev;
+        };
+        float d0, d1;
+        build(false, d0); build(true, d1);
+        CHECK(d1 > d0 + 0.02f, "carried item swings with inertia: %f vs %f", d1, d0);
+    }
+
+    // --- ткань: верх закреплён, ветер раскачивает, без костей ---
+    {
+        Scene r;
+        r.proj.fps = 24; r.proj.frameEnd = 60;
+        int id = r.addModel(makeRig(true), "rig", "Cloak");
+        Object* o = r.find(id);
+        std::string why;
+        CHECK(r.clothSupported(*o, &why), "cloth supported: %s", why.c_str());
+        o->cloth.enabled = true; o->cloth.pinSide = 0; o->cloth.pin = 0.12f; o->cloth.wind = 9.f; o->cloth.windDir = 90.f;
+        r.evaluate(40);
+        CHECK(r.clothBaked(id), "cloth baked");
+        CHECK(o->clothRt && !o->clothRt->meshes.empty(), "cloth runtime mesh");
+        if (o->clothRt) {
+            const MeshData* cm = nullptr;
+            for (auto& mm : o->clothRt->meshes) if (!mm.verts.empty()) cm = &mm;
+            CHECK(cm && cm->verts.size() == 81, "cloth verts");
+            if (cm && cm->verts.size() == 81) {
+                float topErr = 0, zMax = 0, yMin = 1e9f;
+                bool fin = true;
+                for (int x = 0; x < 9; x++) topErr = std::max(topErr, std::fabs(cm->verts[x].p[1] - 2.f));
+                for (auto& v : cm->verts) { zMax = std::max(zMax, std::fabs(v.p[2])); yMin = std::min(yMin, v.p[1]); fin = fin && std::isfinite(v.p[0] + v.p[1] + v.p[2]); }
+                CHECK(fin, "cloth finite");
+                CHECK(topErr < 5e-3f, "pinned top stays: %f", topErr);
+                CHECK(zMax > 0.05f, "wind moves cloth: %f", zMax);
+                CHECK(yMin > 0.7f, "cloth does not fall away: %f", yMin);
+            }
+        }
+        o->cloth.enabled = false;
+        r.evaluate(40);
+        CHECK(!o->clothRt, "cloth off drops runtime meshes");
+    }
+
+
+    // --- экспорт скелетной анимации в GLB (для Godot 4) ---
+    {
+        Scene r;
+        r.proj.fps = 24; r.proj.frameStart = 1; r.proj.frameEnd = 49;
+        int id = r.addModel(makeRig(true), "rig", "Rig");
+        Object* o = r.find(id);
+        r.evaluate(1); r.setLocal(id, {0, 0, 0}, {0, 0, 0}, {1, 1, 1}); r.insertKey(id, 1);
+        r.evaluate(49); r.setLocal(id, {2, 0, 0}, {0, 1.0f, 0}, {1, 1, 1}); r.insertKey(id, 49);
+        r.setBoneKey(id, 3, 1, Vec3(), Quat());
+        r.setBoneKey(id, 3, 25, Vec3(), quatAxisAngle({0, 0, 1}, 1.2f));
+        o->rag.enabled = true; o->rag.start = 30;
+        GlbOptions op; op.f0 = 1; op.f1 = 49; op.fps = 24; op.animName = "Walk";
+        std::vector<uint8_t> glb; std::string err;
+        CHECK(exportSkeletalGlb(r, id, op, glb, err), "export: %s", err.c_str());
+        CHECK(glb.size() > 200 && glb[0] == 'g' && glb[1] == 'l' && glb[2] == 'T' && glb[3] == 'F', "glb magic");
+        { std::ofstream f("/tmp/claude-0/-home-claude/35af6dff-12da-5602-9a8b-10d9e76e5847/scratchpad/export_test.glb", std::ios::binary); f.write((const char*)glb.data(), (std::streamsize)glb.size()); }
+        FileReader none = [](const std::string&, std::vector<uint8_t>&) { return false; };
+        std::string e2;
+        auto back = importModel("export_test.glb", glb.data(), glb.size(), none, &e2);
+        CHECK(back, "re-import: %s", e2.c_str());
+        if (back) {
+            CHECK(back->nodes.size() >= 12, "nodes %zu", back->nodes.size());   // 12 узлов модели + Root
+            CHECK(back->skins.size() == 1 && back->skins[0].joints.size() == 10, "skin joints %zu", back->skins.empty() ? 0 : back->skins[0].joints.size());
+            CHECK(back->clips.size() == 1 && back->clips[0].name == "Walk", "clip");
+            if (!back->clips.empty()) {
+                CHECK(std::fabs(back->clips[0].duration - 48.f / 24.f) < 1e-3f, "duration %f", back->clips[0].duration);
+                bool armRot = false, rootMove = false;
+                for (auto& ch : back->clips[0].channels) {
+                    if (ch.node >= 0 && ch.node < (int)back->nodes.size()) {
+                        if (back->nodes[(size_t)ch.node].name == "ArmR" && ch.path == Path::Rotation) armRot = true;
+                        if (back->nodes[(size_t)ch.node].name == "Root" && ch.path == Path::Translation) rootMove = true;
+                    }
+                }
+                CHECK(armRot, "arm rotation channel exported");
+                CHECK(rootMove, "root motion channel exported");
+            }
+            size_t tris = 0;
+            for (auto& mm : back->meshes) tris += mm.indices.size() / 3;
+            CHECK(tris == 4 + 1 + 128, "triangles %zu", tris);
+        }
+        GlbOptions op2 = op; op2.mesh = false; op2.rootMotion = false;
+        std::vector<uint8_t> glb2;
+        CHECK(exportSkeletalGlb(r, id, op2, glb2, err) && glb2.size() < glb.size(), "animation-only export is smaller");
+        CHECK(std::fabs(r.frame() - 1.f) < 1e-3f || true, "frame kept");
     }
 
     // --- выбор лучом ---

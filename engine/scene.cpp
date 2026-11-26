@@ -252,7 +252,7 @@ int Scene::duplicate(int id) {
     o->metallic = s->metallic; o->roughness = s->roughness; o->emission = s->emission; o->castShadow = s->castShadow;
     o->light = s->light; std::memcpy(o->lcolor, s->lcolor, sizeof o->lcolor); o->energy = s->energy; o->lradius = s->lradius;
     o->fovDeg = s->fovDeg; o->fx = s->fx; o->fxStart = s->fxStart; o->fxEnd = s->fxEnd; o->fxScale = s->fxScale; o->fxRate = s->fxRate;
-    o->fxVariant = s->fxVariant; o->fxPower = s->fxPower; o->fxPush = s->fxPush; o->phys = s->phys; o->boneTracks = s->boneTracks;
+    o->fxVariant = s->fxVariant; o->fxPower = s->fxPower; o->fxPush = s->fxPush; o->phys = s->phys; o->rag = s->rag; o->sec = s->sec; o->cloth = s->cloth; o->boneTracks = s->boneTracks;
     o->name = uniqueName(s->name);
     for (auto& k : o->keys) k.t = k.t + Vec3(0.5f, 0, 0.5f);
     int nid = o->id;
@@ -284,11 +284,14 @@ void Scene::rename(int id, const std::string& nm) {
 // ============================================================ ключевые кадры
 static void sortKeys(std::vector<TKey>& k) { std::sort(k.begin(), k.end(), [](const TKey& a, const TKey& b) { return a.frame < b.frame; }); }
 
-void Scene::evalLocal(const Object& o, float f, Vec3& t, Vec3& r, Vec3& s) const {
+// Поворот между ключами - сферическая интерполяция кватернионов по кратчайшему пути:
+// модель не «прокручивается» на 360° при переходе через ±180° и нет карданова замка.
+Quat Scene::evalLocalQ(const Object& o, float f, Vec3& t, Vec3& s) const {
     const auto& k = o.keys;
-    if (k.empty()) { t = o.t; r = o.r; s = o.s; return; }
-    if (f <= k.front().frame) { t = k.front().t; r = k.front().r; s = k.front().s; return; }
-    if (f >= k.back().frame) { t = k.back().t; r = k.back().r; s = k.back().s; return; }
+    auto qOf = [](const Vec3& r) { return quatEuler(r.x, r.y, r.z); };
+    if (k.empty()) { t = o.t; s = o.s; return qOf(o.r); }
+    if (f <= k.front().frame) { t = k.front().t; s = k.front().s; return qOf(k.front().r); }
+    if (f >= k.back().frame) { t = k.back().t; s = k.back().s; return qOf(k.back().r); }
     size_t i = 0;
     while (i + 1 < k.size() && k[i + 1].frame <= f) i++;
     const TKey& a = k[i];
@@ -296,7 +299,18 @@ void Scene::evalLocal(const Object& o, float f, Vec3& t, Vec3& r, Vec3& s) const
     float u = (f - a.frame) / std::max(1.f, (float)(b.frame - a.frame));
     if (a.ease == 2) u = 0;
     else if (a.ease == 1) u = u * u * (3.f - 2.f * u);
-    t = lerp(a.t, b.t, u); r = lerp(a.r, b.r, u); s = lerp(a.s, b.s, u);
+    t = lerp(a.t, b.t, u);
+    s = lerp(a.s, b.s, u);
+    return slerp(qOf(a.r), qOf(b.r), u);
+}
+
+void Scene::evalLocal(const Object& o, float f, Vec3& t, Vec3& r, Vec3& s) const {
+    const auto& k = o.keys;
+    Quat q = evalLocalQ(o, f, t, s);
+    if (k.empty()) r = o.r;
+    else if (f <= k.front().frame) r = k.front().r;
+    else if (f >= k.back().frame) r = k.back().r;
+    else r = eulerFromMat(fromQuat(q));  // для панели; на сцену идёт сам кватернион
 }
 
 void Scene::insertKeyRaw(Object& o, int frame, Vec3 t, Vec3 r, Vec3 s) {
@@ -435,6 +449,17 @@ void Scene::evalAnimation(Object& o, float f) {
     Model* m = models[o.model].model.get();
     if (!o.anim) { o.anim.reset(new Animator()); o.anim->setModel(m); }
     o.anim->deltas.clear();
+    o.anim->ovrMat = nullptr;
+    o.anim->ovrHas = nullptr;
+    if (!ragOff_ && o.rag.enabled && f >= (float)o.rag.start) {  // рэгдолл: кости ведёт физика
+        auto it = rag_.find(o.id);
+        if (it != rag_.end() && !it->second.mats.empty()) {
+            int i = (int)std::lround(f) - it->second.first;
+            i = std::max(0, std::min(i, (int)it->second.mats.size() - 1));
+            o.anim->ovrMat = &it->second.mats[(size_t)i];
+            o.anim->ovrHas = &it->second.has;
+        }
+    }
     for (const BoneTrack& tr : o.boneTracks) {
         BoneDelta d;
         d.node = tr.node;
@@ -469,15 +494,29 @@ Mat4 Scene::worldOf(Object& o, float f, std::vector<char>& state) {
         if (state[idx] == 2) return o.world;
         state[idx] = 1;
     }
-    Vec3 t, r, s;
-    evalLocal(o, f, t, r, s);
-    Mat4 W = trs(t, quatEuler(r.x, r.y, r.z), s);
+    Vec3 t, s;
+    Quat lq = evalLocalQ(o, f, t, s);
+    Mat4 W = trs(t, lq, s);
+    bool attachedNow = false;
     if (const ParentKey* pk = activeParent(o, f)) {
         int pi = indexOf(pk->parent);
         if (pi >= 0 && state[pi] != 1) {
             Object& p = *objects[pi];
             worldOf(p, f, state);
             W = attachFrom(p, pk->node) * pk->offset;
+            attachedNow = true;
+        }
+    }
+    if (attachedNow && !secOff_ && o.sec.enabled) {  // инерция предмета на кости
+        auto it = sec_.find(o.id);
+        if (it != sec_.end() && !it->second.q.empty()) {
+            int i = (int)std::lround(f) - it->second.first;
+            i = std::max(0, std::min(i, (int)it->second.q.size() - 1));
+            const Quat& d = it->second.q[(size_t)i];
+            if (std::fabs(d.w) < 0.999995f) {
+                Vec3 P = transformPoint(W, {0, 0, 0});
+                W = translate(P) * fromQuat(d) * translate(-P) * W;
+            }
         }
     }
     if (!physOff_ && o.type == ObjType::Model && o.phys.enabled && o.phys.kind == 0 && f >= (float)o.phys.start) {
@@ -505,6 +544,16 @@ void Scene::evaluate(float f) {
     }
     std::vector<char> state(objects.size(), 0);
     for (auto& o : objects) worldOf(*o, f, state);
+    if (!baking_) {
+        for (auto& o : objects) {
+            if (o->type != ObjType::Model) continue;
+            if (o->cloth.enabled && !clothOff_) applyCloth(*o, f);
+            else if (o->clothRt) {  // ткань выключена: возвращаем обычный меш (GL-объекты есть только у уже нарисованных)
+                for (auto& m : o->clothRt->meshes) m.release();
+                o->clothRt.reset();
+            }
+        }
+    }
 }
 
 // ============================================================ эффекты
@@ -577,11 +626,54 @@ std::vector<int> Scene::boneNodes(const Object& o) const {
     if (o.type != ObjType::Model || o.model < 0 || o.model >= (int)models.size() || !models[o.model].model) return out;
     const Model& m = *models[o.model].model;
     std::vector<char> seen(m.nodes.size(), 0);
+    // настоящие суставы: узлы скина без геометрии (меши вроде Player1Mtl2 костями не являются)
     for (const Skin& sk : m.skins)
-        for (int j : sk.joints) if (j >= 0 && j < (int)seen.size() && !seen[j]) { seen[j] = 1; out.push_back(j); }
-    if (out.empty() && m.nodes.size() > 1)  // жёсткий скелет без скина: любой узел можно крутить
-        for (int i : m.order) out.push_back(i);
+        for (int j : sk.joints)
+            if (j >= 0 && j < (int)seen.size() && !seen[j]) {
+                seen[j] = 1;
+                if (m.nodes[j].meshes.empty()) out.push_back(j);
+            }
+    if (out.empty() && m.skins.empty() && m.nodes.size() > 1) {  // жёсткий скелет без скина: пустые узлы-сочленения
+        for (int i : m.order) if (m.nodes[i].meshes.empty()) out.push_back(i);
+        if (out.empty()) for (int i : m.order) out.push_back(i);   // только детали-меши: крутим сами детали
+    }
     return out;
+}
+
+int Scene::boneParent(const Object& o, int node) const {
+    if (o.type != ObjType::Model || o.model < 0 || o.model >= (int)models.size() || !models[o.model].model) return -1;
+    const Model& m = *models[o.model].model;
+    if (node < 0 || node >= (int)m.nodes.size()) return -1;
+    std::vector<char> isB(m.nodes.size(), 0);
+    for (int n : boneNodes(o)) isB[n] = 1;
+    int p = m.nodes[node].parent;
+    for (int guard = 0; p >= 0 && !isB[p] && guard < 4096; guard++) p = m.nodes[p].parent;
+    return p;
+}
+
+bool Scene::boneWorldPos(const Object& o, int node, Vec3& p) const {
+    if (!o.anim || node < 0 || node >= (int)o.anim->world.size()) return false;
+    p = transformPoint(o.world * o.fit * o.anim->world[node], {0, 0, 0});
+    return true;
+}
+
+bool Scene::boneFromWorld(const Object& o, int node, const Quat& rw, const Vec3& worldMove, const Vec3& t0, const Quat& d0, Vec3& tOut, Quat& dOut) const {
+    if (o.type != ObjType::Model || !o.anim || o.model < 0 || o.model >= (int)models.size() || !models[o.model].model) return false;
+    const Model& m = *models[o.model].model;
+    if (node < 0 || node >= (int)m.nodes.size() || node >= (int)o.anim->world.size()) return false;
+    // мировая матрица родителя узла (у корня - матрица самого объекта)
+    Mat4 pw = o.world * o.fit;
+    int p = m.nodes[node].parent;
+    if (p >= 0 && p < (int)o.anim->world.size()) pw = pw * o.anim->world[p];
+    Vec3 pt, ps;
+    Quat pq;
+    decompose(pw, pt, pq, ps);
+    pq = normalize(pq);
+    Quat pc(-pq.x, -pq.y, -pq.z, pq.w);
+    // поправка в пространстве родителя: d_new = conj(Pq) * Rw * Pq * d_old
+    dOut = normalize(pc * rw * pq * d0);
+    tOut = t0 + transformDir(inverse(pw), worldMove);
+    return true;
 }
 
 int Scene::boneCount(const Object& o) const { return (int)boneNodes(o).size(); }
@@ -659,19 +751,29 @@ static inline void hv(uint64_t& h, Vec3 v) { hf(h, v.x); hf(h, v.y); hf(h, v.z);
 uint64_t Scene::physSignature() const {
     uint64_t h = 1469598103934665603ull;
     hmix(h, (uint32_t)proj.fps); hmix(h, (uint32_t)proj.frameStart); hmix(h, (uint32_t)proj.frameEnd); hmix(h, render.floor ? 1u : 0u);
+    std::vector<int> parentIds;
+    for (const auto& op : objects) for (const auto& pk : op->parents) if (pk.parent >= 0) parentIds.push_back(pk.parent);
     for (const auto& op : objects) {
         const Object& o = *op;
-        bool rel = o.type == ObjType::Model || (o.type == ObjType::Effect && o.fx == FxKind::Explosion);
+        bool rel = o.type == ObjType::Model || (o.type == ObjType::Effect && o.fx == FxKind::Explosion) ||
+                   std::find(parentIds.begin(), parentIds.end(), o.id) != parentIds.end();
         if (!rel) continue;
         hmix(h, (uint32_t)o.id); hmix(h, (uint32_t)o.model);
         hv(h, o.t); hv(h, o.r); hv(h, o.s);
         for (const auto& k : o.keys) { hmix(h, (uint32_t)k.frame); hv(h, k.t); hv(h, k.r); hv(h, k.s); hmix(h, (uint32_t)k.ease); }
         for (const auto& k : o.parents) { hmix(h, (uint32_t)k.frame); hmix(h, (uint32_t)k.parent); hmix(h, (uint32_t)k.node); for (int q = 0; q < 16; q++) hf(h, k.offset.m[q]); }
         for (const auto& k : o.clipKeys) { hmix(h, (uint32_t)k.frame); hmix(h, (uint32_t)k.clip); hf(h, k.speed); }
-        for (const auto& tr : o.boneTracks) for (const auto& k : tr.keys) { hmix(h, (uint32_t)tr.node); hmix(h, (uint32_t)k.frame); hv(h, k.t); hf(h, k.r.x); hf(h, k.r.y); hf(h, k.r.z); hf(h, k.r.w); }
+        for (const auto& k : o.visKeys) { hmix(h, (uint32_t)k.frame); hmix(h, k.visible ? 1u : 0u); }
+        for (const auto& tr : o.boneTracks) for (const auto& k : tr.keys) { hmix(h, (uint32_t)tr.node); hmix(h, (uint32_t)k.frame); hv(h, k.t); hf(h, k.r.x); hf(h, k.r.y); hf(h, k.r.z); hf(h, k.r.w); hmix(h, (uint32_t)k.ease); }
         const PhysProps& p = o.phys;
         hmix(h, p.enabled ? 1u : 0u); hmix(h, (uint32_t)p.kind); hmix(h, (uint32_t)p.shape); hf(h, p.mass); hf(h, p.bounce); hf(h, p.friction);
         hmix(h, (uint32_t)p.start); hmix(h, p.inherit ? 1u : 0u); hv(h, p.vel); hv(h, p.spin);
+        const RagdollProps& rg = o.rag;
+        hmix(h, rg.enabled ? 1u : 0u); hmix(h, (uint32_t)rg.start); hf(h, rg.mass); hf(h, rg.friction); hf(h, rg.bounce); hf(h, rg.limit); hf(h, rg.thick); hmix(h, rg.inherit ? 1u : 0u); hv(h, rg.push);
+        const SecondaryProps& sc = o.sec;
+        hmix(h, sc.enabled ? 1u : 0u); hf(h, sc.stiffness); hf(h, sc.damping); hf(h, sc.gravity); hf(h, sc.amount);
+        const ClothProps& cl = o.cloth;
+        hmix(h, cl.enabled ? 1u : 0u); hmix(h, (uint32_t)cl.pinSide); hf(h, cl.pin); hf(h, cl.stiffness); hf(h, cl.shape); hf(h, cl.damping); hf(h, cl.gravity); hf(h, cl.wind); hf(h, cl.windDir);
         if (o.type == ObjType::Effect) { hmix(h, (uint32_t)o.fxStart); hf(h, o.fxPower); hf(h, o.fxScale); hmix(h, o.fxPush ? 1u : 0u); }
     }
     return h;
@@ -681,15 +783,59 @@ bool Scene::physicsActive(const Object& o, float f) const {
     return o.type == ObjType::Model && o.phys.enabled && o.phys.kind == 0 && f >= (float)o.phys.start;
 }
 
+bool Scene::boxOfObject(const Object& o, Vec3& centerW, Quat& q, Vec3& half, Vec3& localC) const {
+    if (o.model < 0 || o.model >= (int)models.size() || !models[o.model].model) return false;
+    const Model& m = *models[o.model].model;
+    Mat4 M = o.world * o.fit;
+    Vec3 t, sc;
+    decompose(M, t, q, sc);
+    q = normalize(q);
+    localC = (m.bmin + m.bmax) * 0.5f;
+    centerW = transformPoint(M, localC);
+    Vec3 ext = (m.bmax - m.bmin) * 0.5f;
+    half = {std::max(0.02f, std::fabs(sc.x) * ext.x), std::max(0.02f, std::fabs(sc.y) * ext.y), std::max(0.02f, std::fabs(sc.z) * ext.z)};
+    return true;
+}
+
 void Scene::bakePhysics() {
     if (baking_) return;
     uint64_t sig = physSignature();
     if (phys_.valid && phys_.sig == sig) return;
     phys_.mats.clear();
+    rag_.clear();
+    sec_.clear();
+    cloth_.clear();
     phys_.valid = true;
     phys_.sig = sig;
     phys_.first = 0;
     phys_.last = -1;
+    bool anyRigid = false, anyRag = false, anySec = false, anyCloth = false;
+    for (auto& op : objects) {
+        const Object& o = *op;
+        if (o.type != ObjType::Model || o.model < 0 || o.model >= (int)models.size() || !models[o.model].model) continue;
+        if (o.phys.enabled && o.phys.kind == 0) anyRigid = true;
+        if (o.rag.enabled) anyRag = true;
+        if (o.sec.enabled) anySec = true;
+        if (o.cloth.enabled) anyCloth = true;
+    }
+    if (!anyRigid && !anyRag && !anySec && !anyCloth) return;
+
+    baking_ = true;
+    float saved = frame_;
+    physOff_ = ragOff_ = secOff_ = clothOff_ = true;
+    if (anyRigid) bakeRigid();
+    physOff_ = false;  // дальше всё считается поверх результата твёрдых тел
+    if (anyRag) bakeRagdolls();
+    ragOff_ = false;
+    if (anySec) bakeSecondary();
+    secOff_ = false;
+    if (anyCloth) bakeCloth();
+    clothOff_ = false;
+    baking_ = false;
+    evaluate(saved);
+}
+
+void Scene::bakeRigid() {
     std::vector<Object*> dyn, col, boom;
     for (auto& op : objects) {
         Object* o = op.get();
@@ -698,9 +844,6 @@ void Scene::bakePhysics() {
     }
     if (dyn.empty()) return;
 
-    baking_ = true;
-    physOff_ = true;
-    float saved = frame_;
     int fps = std::max(1, proj.fps);
     int first = 1 << 30;
     for (Object* o : dyn) first = std::min(first, std::max(0, o->phys.start));
@@ -726,17 +869,7 @@ void Scene::bakePhysics() {
     int sub = std::max(1, (int)std::lround(120.0 / fps));
     float dtSub = 1.f / (float)fps / (float)sub;
 
-    auto boxOf = [&](const Object& o, Vec3& centerW, Quat& q, Vec3& half, Vec3& localC) {
-        const Model& m = *models[o.model].model;
-        Mat4 M = o.world * o.fit;
-        Vec3 t, sc;
-        decompose(M, t, q, sc);
-        q = normalize(q);
-        localC = (m.bmin + m.bmax) * 0.5f;
-        centerW = transformPoint(M, localC);
-        Vec3 ext = (m.bmax - m.bmin) * 0.5f;
-        half = {std::max(0.02f, std::fabs(sc.x) * ext.x), std::max(0.02f, std::fabs(sc.y) * ext.y), std::max(0.02f, std::fabs(sc.z) * ext.z)};
-    };
+    auto boxOf = [&](const Object& o, Vec3& centerW, Quat& q, Vec3& half, Vec3& localC) { boxOfObject(o, centerW, q, half, localC); };
 
     std::map<int, Mat4> prevW;
     for (int f = first - 1; f <= last; f++) {
@@ -814,9 +947,6 @@ void Scene::bakePhysics() {
         for (int k = 0; k < sub; k++) w.step(dtSub);
         for (Rec& r : recs) prevW[r.o->id] = r.o->world;
     }
-    physOff_ = false;
-    baking_ = false;
-    evaluate(saved);
 }
 
 // ============================================================ выбор
@@ -955,6 +1085,16 @@ std::string Scene::toJson() const {
         o.key("shape"); o.num(b.phys.shape); o.raw(","); o.key("mass"); o.num(b.phys.mass); o.raw(","); o.key("bounce"); o.num(b.phys.bounce); o.raw(",");
         o.key("fric"); o.num(b.phys.friction); o.raw(","); o.key("start"); o.num(b.phys.start); o.raw(","); o.key("inherit"); o.raw(b.phys.inherit ? "true," : "false,");
         o.key("vel"); o.vec(b.phys.vel); o.raw(","); o.key("spin"); o.vec(b.phys.spin); o.raw("},");
+        o.key("rag"); o.raw("{"); o.key("on"); o.raw(b.rag.enabled ? "true," : "false,"); o.key("start"); o.num(b.rag.start); o.raw(",");
+        o.key("mass"); o.num(b.rag.mass); o.raw(","); o.key("fric"); o.num(b.rag.friction); o.raw(","); o.key("bounce"); o.num(b.rag.bounce); o.raw(",");
+        o.key("limit"); o.num(b.rag.limit); o.raw(","); o.key("thick"); o.num(b.rag.thick); o.raw(","); o.key("inherit"); o.raw(b.rag.inherit ? "true," : "false,");
+        o.key("push"); o.vec(b.rag.push); o.raw("},");
+        o.key("sec"); o.raw("{"); o.key("on"); o.raw(b.sec.enabled ? "true," : "false,"); o.key("stiff"); o.num(b.sec.stiffness); o.raw(",");
+        o.key("damp"); o.num(b.sec.damping); o.raw(","); o.key("grav"); o.num(b.sec.gravity); o.raw(","); o.key("amount"); o.num(b.sec.amount); o.raw("},");
+        o.key("cloth"); o.raw("{"); o.key("on"); o.raw(b.cloth.enabled ? "true," : "false,"); o.key("pinSide"); o.num(b.cloth.pinSide); o.raw(",");
+        o.key("pin"); o.num(b.cloth.pin); o.raw(","); o.key("stiff"); o.num(b.cloth.stiffness); o.raw(","); o.key("shape"); o.num(b.cloth.shape); o.raw(",");
+        o.key("damp"); o.num(b.cloth.damping); o.raw(","); o.key("grav"); o.num(b.cloth.gravity); o.raw(","); o.key("wind"); o.num(b.cloth.wind); o.raw(",");
+        o.key("windDir"); o.num(b.cloth.windDir); o.raw("},");
         o.key("bones"); o.raw("[");
         for (size_t k = 0; k < b.boneTracks.size(); k++) {
             const BoneTrack& tr = b.boneTracks[k];
@@ -1025,6 +1165,19 @@ bool Scene::applyScene(const Json& j, std::string* err) {
             o->phys.mass = (float)pj["mass"].number(1); o->phys.bounce = (float)pj["bounce"].number(0.3); o->phys.friction = (float)pj["fric"].number(0.6);
             o->phys.start = pj["start"].integer(1); o->phys.inherit = jbool(pj["inherit"], true);
             o->phys.vel = jvec(pj["vel"]); o->phys.spin = jvec(pj["spin"]);
+        }
+        {
+            const Json& rj = b["rag"];
+            o->rag.enabled = jbool(rj["on"], false); o->rag.start = rj["start"].integer(1); o->rag.mass = (float)rj["mass"].number(60);
+            o->rag.friction = (float)rj["fric"].number(0.8); o->rag.bounce = (float)rj["bounce"].number(0.05); o->rag.limit = (float)rj["limit"].number(70);
+            o->rag.thick = (float)rj["thick"].number(1); o->rag.inherit = jbool(rj["inherit"], true); o->rag.push = jvec(rj["push"]);
+            const Json& sj = b["sec"];
+            o->sec.enabled = jbool(sj["on"], false); o->sec.stiffness = (float)sj["stiff"].number(40); o->sec.damping = (float)sj["damp"].number(5);
+            o->sec.gravity = (float)sj["grav"].number(0.5); o->sec.amount = (float)sj["amount"].number(1);
+            const Json& cj = b["cloth"];
+            o->cloth.enabled = jbool(cj["on"], false); o->cloth.pinSide = cj["pinSide"].integer(0); o->cloth.pin = (float)cj["pin"].number(0.12);
+            o->cloth.stiffness = (float)cj["stiff"].number(0.8); o->cloth.shape = (float)cj["shape"].number(0.12); o->cloth.damping = (float)cj["damp"].number(0.03);
+            o->cloth.gravity = (float)cj["grav"].number(1); o->cloth.wind = (float)cj["wind"].number(0); o->cloth.windDir = (float)cj["windDir"].number(0);
             for (size_t k = 0; k < b["bones"].size(); k++) {
                 const Json& e = b["bones"][k];
                 BoneTrack tr; tr.node = e["n"].integer(-1);

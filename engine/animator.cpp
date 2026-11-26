@@ -145,7 +145,9 @@ void Animator::computeMatrices() {
         }
         P = &tmp;
     }
+    bool ovr = ovrMat && ovrHas && ovrMat->size() == model_->nodes.size() && ovrHas->size() == model_->nodes.size();
     for (int i : model_->order) {
+        if (ovr && (*ovrHas)[i]) { world[i] = (*ovrMat)[i]; continue; }
         Mat4 local = trs(P->t[i], P->r[i], P->s[i]);
         int p = model_->nodes[i].parent;
         world[i] = p >= 0 ? world[p] * local : local;

@@ -808,7 +808,13 @@ void Renderer::drawModels(Scene& sc, int pass, const Locs& L, const Vec3& eye) {
         int lastSkin = -2;
         for (int ni : m.order) {
             for (int mi : m.nodes[ni].meshes) {
-                const MeshData& md = m.meshes[mi];
+                const MeshData* mp = &m.meshes[mi];
+                if (o.clothRt && (size_t)mi < o.clothRt->meshes.size() && !o.clothRt->meshes[(size_t)mi].verts.empty()) {
+                    MeshData& cm = o.clothRt->meshes[(size_t)mi];  // ткань: деформированная копия меша
+                    if (!cm.vao) cm.upload(); else if (cm.stale) cm.updateVerts();
+                    mp = &cm;
+                }
+                const MeshData& md = *mp;
                 bool blend = md.alphaMode == 2;
                 if ((pass == 2) != blend && pass != 0) continue;
                 Mat4 M;
@@ -1050,7 +1056,7 @@ void Renderer::buildOverlay(Scene& sc, const View& v, const Overlay& ov) {
                 L.add(pos, {pos.x, 0.f, pos.z}, dim, 1.f * px);
             }
         } else if (o.type == ObjType::Effect) {
-            static const float fxc[5][4] = {{1.f, 0.5f, 0.1f, 1.f}, {0.7f, 0.7f, 0.75f, 1.f}, {1.f, 0.9f, 0.3f, 1.f}, {1.f, 0.3f, 0.2f, 1.f}, {1.f, 0.85f, 0.5f, 1.f}};
+            static const float fxc[6][4] = {{1.f, 0.5f, 0.1f, 1.f}, {0.7f, 0.7f, 0.75f, 1.f}, {1.f, 0.9f, 0.3f, 1.f}, {1.f, 0.3f, 0.2f, 1.f}, {1.f, 0.85f, 0.5f, 1.f}, {0.8f, 0.05f, 0.1f, 1.f}};
             const float* c2 = sel ? orange : fxc[(int)o.fx];
             float k = 0.2f;
             L.add(pos - ax * k, pos + ax * k, c2, lw); L.add(pos - ay * k, pos + ay * k, c2, lw); L.add(pos - az * k, pos + az * k, c2, lw);

@@ -39,6 +39,13 @@ struct Col {
 
 namespace theme {
 extern Col bg, panel, panel2, widget, widgetHot, accent, accent2, text, textDim, danger, ok, keyCol, line, orange;
+// onAccent - текст на акцентных кнопках; accentEnd - конец градиента главной кнопки (у плоских тем равен accent);
+// overlay - плашки поверх 3D-окна; shade - затемнение под окнами; popup - всплывающие подписи; homeTop - верх главного экрана; thumb - фон превью.
+extern Col onAccent, accentEnd, overlay, shade, popup, homeTop, thumb;
+constexpr int kCount = 3;
+const char* name(int id);          // «Чёрная», «Белая», «GTA 6»
+void apply(int id);                // 0 чёрная, 1 белая, 2 в стиле GTA 6
+bool gradient();                   // у темы градиентные главные кнопки
 }
 
 enum class Icon {

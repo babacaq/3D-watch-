@@ -69,6 +69,50 @@ struct PhysProps {
     Vec3 spin;           // добавочное вращение, рад/с
 };
 
+// Рэгдолл: кости скелета становятся твёрдыми телами на шарнирах и падают с выбранного кадра.
+struct RagdollProps {
+    bool enabled = false;
+    int start = 1;          // кадр включения
+    float mass = 60.f;      // общая масса, кг
+    float friction = 0.8f, bounce = 0.05f;
+    float limit = 70.f;     // предел сгиба суставов, градусы
+    float thick = 1.f;      // толщина тел-костей
+    bool inherit = true;    // подхватить скорость, с которой шла анимация
+    Vec3 push;              // добавочный толчок, м/с (мировые оси)
+};
+
+// Вторичная физика: предмет, прицепленный к кости (оружие на спине, сумка), качается по инерции.
+struct SecondaryProps {
+    bool enabled = false;
+    float stiffness = 40.f;  // возвращающая сила
+    float damping = 5.f;
+    float gravity = 0.5f;    // провисание вниз
+    float amount = 1.f;      // доля размаха
+};
+
+// Ткань / пружины вершин для меша без костей (плащ, волосы, флаг).
+struct ClothProps {
+    bool enabled = false;
+    int pinSide = 0;         // 0 закреплена верхняя часть, 1 нижняя
+    float pin = 0.12f;       // доля высоты, которая закреплена
+    float stiffness = 0.8f;  // жёсткость связей 0..1
+    float shape = 0.12f;     // возврат к исходной форме (пружины вершин)
+    float damping = 0.03f;
+    float gravity = 1.f;
+    float wind = 0.f;        // м/с
+    float windDir = 0.f;     // направление ветра, градусы вокруг Y
+};
+
+// Деформированные копии мешей объекта (ткань); GL-буферы заводит и обновляет рендерер.
+struct ClothRt {
+    std::vector<MeshData> meshes;  // по индексу меша модели; без вершин = не ткань
+    bool dirty = false;
+    ClothRt() = default;
+    ClothRt(const ClothRt&) = delete;
+    ClothRt& operator=(const ClothRt&) = delete;
+    ~ClothRt() { for (auto& m : meshes) m.release(); }
+};
+
 struct Object {
     int id = 0;
     std::string name;
@@ -109,12 +153,16 @@ struct Object {
 
     // Физика и кости
     PhysProps phys;
+    RagdollProps rag;
+    SecondaryProps sec;
+    ClothProps cloth;
     std::vector<BoneTrack> boneTracks;
 
     // ---- вычисляется при evaluate() ----
     Mat4 world;
     bool visibleNow = true;
     std::unique_ptr<Animator> anim;
+    std::unique_ptr<ClothRt> clothRt;
     float fxAcc[3] = {0, 0, 0};
 };
 
@@ -137,7 +185,7 @@ struct RenderSettings {
     float floorColor[3] = {0.36f, 0.36f, 0.38f};
     float floorRoughness = 0.7f;
     bool vignette = true;
-    int exportW = 1080, exportH = 1920;
+    int exportW = 1080, exportH = 1920;  // формат кадра: вертикальный по умолчанию, можно горизонтальный
     int stillSamples = 24;  // проходов накопления для скриншота
     int videoSamples = 3;   // проходов накопления на кадр видео
     int videoBitrateMbps = 16;
@@ -209,10 +257,18 @@ public:
     bool deleteBoneKey(int id, int node, int frame);
     void clearBone(int id, int node);
     int boneCount(const Object& o) const;                        // сколько костей в скелете модели
-    std::vector<int> boneNodes(const Object& o) const;           // узлы-кости (суставы скинов)
+    std::vector<int> boneNodes(const Object& o) const;           // только настоящие суставы: узлы с геометрией не считаются
+    int boneParent(const Object& o, int node) const;             // ближайший предок-сустав или -1
+    // Поза кости по движению гизмо в мировых осях: вращение rw и сдвиг worldMove относительно позы (t0, d0) в момент нажатия.
+    bool boneFromWorld(const Object& o, int node, const Quat& rw, const Vec3& worldMove, const Vec3& t0, const Quat& d0, Vec3& tOut, Quat& dOut) const;
+    bool boneWorldPos(const Object& o, int node, Vec3& p) const;  // положение сустава в мире
 
     // ---- физика ----
-    void bakePhysics();                       // пересчитывается сама при изменении сцены
+    void bakePhysics();                       // пересчитывается сама при изменении сцены (твёрдые тела, рэгдолл, маятник, ткань)
+    bool ragdollBaked(int id) const { auto it = rag_.find(id); return it != rag_.end() && !it->second.mats.empty(); }
+    bool clothBaked(int id) const { auto it = cloth_.find(id); return it != cloth_.end() && !it->second.meshes.empty(); }
+    bool clothSupported(const Object& o, std::string* why = nullptr) const;  // есть меши без скелета и их не слишком много
+    void releaseGL();                         // освободить GL-буферы ткани (до удаления контекста)
     bool physicsActive(const Object& o, float f) const;
     int physicsFrames() const { return phys_.last - phys_.first + 1; }
 
@@ -242,6 +298,7 @@ public:
 private:
     bool applyScene(const Json& j, std::string* err);
     void evalLocal(const Object& o, float f, Vec3& t, Vec3& r, Vec3& s) const;
+    Quat evalLocalQ(const Object& o, float f, Vec3& t, Vec3& s) const;  // поворот между ключами - SLERP кватернионов
     Mat4 attachFrom(const Object& parent, int node) const;
     Mat4 worldOf(Object& o, float f, std::vector<char>& state);
     void evalAnimation(Object& o, float f);
@@ -256,8 +313,38 @@ private:
         uint64_t sig = 0;
         bool valid = false;
     } phys_;
-    bool physOff_ = false, baking_ = false;
+    bool physOff_ = false, baking_ = false, ragOff_ = false, secOff_ = false, clothOff_ = false;
     uint64_t physSignature() const;
+    bool boxOfObject(const Object& o, Vec3& centerW, Quat& q, Vec3& half, Vec3& localC) const;
+    void bakeRigid();
+    void bakeRagdolls();
+    void bakeSecondary();
+    void bakeCloth();
+    void applyCloth(Object& o, float f);
+
+    // рэгдолл: на каждом кадре от first - матрицы узлов в пространстве модели (для костей-тел)
+    struct RagBake {
+        int first = 0, last = -1;
+        std::vector<std::vector<Mat4>> mats;
+        std::vector<char> has;
+    };
+    std::map<int, RagBake> rag_;
+    struct SecBake {
+        int first = 0;
+        std::vector<Quat> q;
+    };
+    std::map<int, SecBake> sec_;
+    struct ClothMeshBake {
+        int mesh = 0;
+        int particles = 0;
+        std::vector<int> vmap;      // вершина меша -> частица
+        std::vector<Vec3> pos;      // кадры × частицы, в пространстве узла меша
+    };
+    struct ClothBake {
+        int first = 0, last = -1;
+        std::vector<ClothMeshBake> meshes;
+    };
+    std::map<int, ClothBake> cloth_;
 
     float frame_ = 1.f;
     int nextId_ = 1;

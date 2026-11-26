@@ -17,6 +17,8 @@ struct Vec3 {
     Vec3 operator*(float s) const { return {x * s, y * s, z * s}; }
     Vec3 operator-() const { return {-x, -y, -z}; }
     Vec3& operator+=(const Vec3& o) { x += o.x; y += o.y; z += o.z; return *this; }
+    Vec3& operator-=(const Vec3& o) { x -= o.x; y -= o.y; z -= o.z; return *this; }
+    Vec3& operator*=(float s) { x *= s; y *= s; z *= s; return *this; }
 };
 inline float dot(const Vec3& a, const Vec3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 inline Vec3 cross(const Vec3& a, const Vec3& b) {

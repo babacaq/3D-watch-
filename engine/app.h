@@ -18,6 +18,7 @@ struct Platform {
     std::string dataDir;                                                                  // папка для проектов и моделей
     std::function<void()> importModels;                                                   // открыть выбор файлов
     std::function<bool(const std::string& name, const std::vector<uint8_t>& png)> savePng;  // сохранить в галерею
+    std::function<bool(const std::string& name, const std::vector<uint8_t>& data, const std::string& mime)> saveFile;  // в «Загрузки/PrismLab»
     std::function<bool(int w, int h, int fps, int mbps, const std::string& name)> videoBegin;
     std::function<bool(const uint8_t* rgba, int w, int h, int index)> videoFrame;
     std::function<bool()> videoEnd;
@@ -40,9 +41,25 @@ struct Modal {
     std::string yesLabel = "Да";
 };
 
+struct Settings {
+    int theme = 0;              // 0 чёрная, 1 белая, 2 GTA 6
+    float uiScale = 1.f;        // масштаб интерфейса
+    float orbitSens = 1.f;      // чувствительность вращения вида
+    bool inertia = true;        // вид «доезжает» после броска
+    bool invertY = false;       // инвертировать наклон вида
+    bool doubleTapFocus = true; // двойной тап по сцене: показать выбранный объект
+};
+
 class App {
 public:
     Platform plat;
+    Settings settings;
+    void loadSettings();
+    void saveSettings() const;
+    void openSettings() { settingsOpen_ = true; scrollSettings_.off = 0; }
+    void closeSettings() { settingsOpen_ = false; }
+    bool settingsOpen() const { return settingsOpen_; }
+    void setTheme(int id) { settings.theme = id; theme::apply(id); saveSettings(); }
     Scene scene;
     Renderer renderer;
     UI ui;
@@ -83,6 +100,8 @@ public:
     void openAddMenu();
     void openMainMenu();
     void startStillExport();
+    void exportSkeletalAnimation(int mode);  // 0 всё, 1 на месте, 2 только скелет
+    void skeletalExportMenu();
     void startVideoExport();
     bool exporting() const { return exp_.kind != Export::None; }
     Rect viewportRect() const { return rVP_; }
@@ -115,6 +134,7 @@ private:
     bool boneAtScreen(float x, float y, int& node) const;
     bool boneScreenPos(const Object& o, int node, float& sx, float& sy) const;
     void boneDrag(float dx, float dy);
+    void panelSimExtras(Object& o);
     void boneKeyNow();
     void panelBones(const Rect& r);
     void panelPhysics(const Rect& r);
@@ -159,6 +179,8 @@ private:
     int gizmoHit(float x, float y);
     void gizmoDrag(float x, float y);
     void drawGizmo();
+    bool boneGizmo() const;
+    int gizmoEff() const;
     void cameraGesture(float dyaw, float dpitch, float dolly, float panX, float panY);
     void orbitGesture(float dx, float dy, float zoomRatio, float panX, float panY);
     void focusSelected();
@@ -183,6 +205,21 @@ private:
     float density_ = 1.f;
     double lastTime_ = -1;
     float dt_ = 1.f / 60;
+    double now_ = 0;
+    // настройки и камера
+    bool settingsOpen_ = false;
+    ScrollState scrollSettings_;
+    float contentSettings_ = 0;
+    void drawSettings();
+    float oVelX_ = 0, oVelY_ = 0;                   // скорость вращения вида (пикс/с) для инерции
+    bool goalOn_ = false, goalAng_ = false;         // плавный переход камеры к цели
+    Vec3 goalTarget_;
+    float goalDist_ = 7.5f, goalYaw_ = 0, goalPitch_ = 0;
+    double lastTapT_ = -10;
+    float lastTapX_ = 0, lastTapY_ = 0;
+    void updateCameraMotion();
+    void viewPresetMenu();
+    void viewPreset(int i);
     Rect rTop_, rVP_, rTL_, rPanel_, rTab_;
     Tab tab_ = Tab::None;
     ScrollState scrollScene_, scrollObj_, scrollAnim_, scrollRender_, scrollBones_, scrollPhys_, scrollFx_, scrollBar_, scrollHome_;
@@ -239,6 +276,8 @@ private:
     int gizmoActive_ = -1;
     Mat4 gW0_;                 // матрица объекта в момент нажатия
     Vec3 gO0_, gAxis_;
+    Vec3 gBoneT0_;             // поза кости в момент нажатия
+    Quat gBoneD0_;
     float gT0_ = 0, gAng0_ = 0, gAngAcc_ = 0, gAngPrev_ = 0;
     Vec3 gHit0_;
     float gStartX_ = 0, gStartY_ = 0;
@@ -258,5 +297,8 @@ private:
         bool begun = false;
     } exp_;
 };
+
+// Поза кости на кадре (создаёт нулевой ключ на первом кадре, чтобы поза не «протекала» назад).
+void writeBonePose(Scene& sc, Object& o, int node, int frame, const Vec3& t, const Quat& r);
 
 }  // namespace eng

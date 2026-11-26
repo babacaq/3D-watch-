@@ -154,7 +154,7 @@ void App::drawHome() {
     Gfx& g = ui.g;
     float S = ui.S;
     if (homeDirty_) refreshHome();
-    g.rectGrad(Rect(0, 0, (float)W_, (float)H_), Col::hex(0x120F2E), theme::bg, 0);
+    g.rectGrad(Rect(0, 0, (float)W_, (float)H_), theme::homeTop, theme::bg, 0);
 
     float cw = std::min((float)W_ - 24 * S, 680 * S);
     float x0 = (W_ - cw) * 0.5f;
@@ -179,12 +179,12 @@ void App::drawHome() {
         (void)id;
         bool tap = false;
         ui.listRow(r, false, &tap);
-        if (primary) g.rectGrad(r, theme::accent, Col::hex(0x6D3FE0), 14 * S);
+        if (primary) g.rectGrad(r, theme::accent, theme::accentEnd, 14 * S);
         else g.rect(r, theme::panel2, 14 * S);
-        g.rect(Rect(r.x + 14 * S, r.cy() - 22 * S, 44 * S, 44 * S), Col(1, 1, 1, primary ? 0.18f : 0.08f), 12 * S);
-        g.icon(ic, Rect(r.x + 14 * S, r.cy() - 22 * S, 44 * S, 44 * S).inset(10 * S), Col(1, 1, 1, 1));
-        g.text(title, r.x + 74 * S, r.cy() - (sub.empty() ? -6 : 2) * S, 18 * S, theme::text);
-        if (!sub.empty()) g.text(g.fit(sub, 12.5f * S, r.w - 90 * S), r.x + 74 * S, r.cy() + 20 * S, 12.5f * S, primary ? Col(1, 1, 1, 0.75f) : theme::textDim);
+        g.rect(Rect(r.x + 14 * S, r.cy() - 22 * S, 44 * S, 44 * S), primary ? theme::onAccent.alpha(0.18f) : theme::text.alpha(0.08f), 12 * S);
+        g.icon(ic, Rect(r.x + 14 * S, r.cy() - 22 * S, 44 * S, 44 * S).inset(10 * S), primary ? theme::onAccent : theme::text);
+        g.text(title, r.x + 74 * S, r.cy() - (sub.empty() ? -6 : 2) * S, 18 * S, primary ? theme::onAccent : theme::text);
+        if (!sub.empty()) g.text(g.fit(sub, 12.5f * S, r.w - 90 * S), r.x + 74 * S, r.cy() + 20 * S, 12.5f * S, primary ? theme::onAccent.alpha(0.78f) : theme::textDim);
         return tap;
     };
     if (bigCard(Icon::Plus, "Новый проект", "Пустая сцена с камерой и светом", true)) {
@@ -222,7 +222,7 @@ void App::drawHome() {
         g.rect(r, theme::panel2, 14 * S);
         // превью
         Rect th(r.x + 10 * S, r.y + 10 * S, 128 * S, 78 * S);
-        g.rect(th, Col::hex(0x1E1B40), 10 * S);
+        g.rect(th, theme::thumb, 10 * S);
         if (!p.tex && !p.thumbTried) {
             p.thumbTried = true;
             std::vector<uint8_t> d;

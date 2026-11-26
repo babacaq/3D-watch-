@@ -33,7 +33,7 @@ struct Host {
     int w = 0, h = 0;
     float density = 2.7f;
     JNIEnv* env = nullptr;
-    jmethodID midOpen = nullptr, midTake = nullptr, midSavePng = nullptr, midToast = nullptr;
+    jmethodID midOpen = nullptr, midTake = nullptr, midSavePng = nullptr, midSaveFile = nullptr, midToast = nullptr;
     jmethodID midVBegin = nullptr, midVFrame = nullptr, midVEnd = nullptr, midVCancel = nullptr;
 };
 
@@ -57,6 +57,7 @@ bool attachJni(Host& a) {
     a.midOpen = a.env->GetMethodID(cls, "openPicker", "()V");
     a.midTake = a.env->GetMethodID(cls, "takePending", "()Ljava/lang/String;");
     a.midSavePng = a.env->GetMethodID(cls, "savePng", "(Ljava/lang/String;[B)Z");
+    a.midSaveFile = a.env->GetMethodID(cls, "saveFile", "(Ljava/lang/String;[BLjava/lang/String;)Z");
     a.midToast = a.env->GetMethodID(cls, "toast", "(Ljava/lang/String;)V");
     a.midVBegin = a.env->GetMethodID(cls, "videoBegin", "(IIIILjava/lang/String;)Z");
     a.midVFrame = a.env->GetMethodID(cls, "videoFrame", "(Ljava/nio/ByteBuffer;III)Z");
@@ -87,6 +88,19 @@ void setupPlatform(Host& a) {
         h->env->SetByteArrayRegion(arr, 0, (jsize)png.size(), (const jbyte*)png.data());
         jboolean ok = h->env->CallBooleanMethod(h->app->activity->clazz, h->midSavePng, jn, arr);
         h->env->DeleteLocalRef(jn);
+        h->env->DeleteLocalRef(arr);
+        return !clearExc(h->env) && ok;
+    };
+    p.saveFile = [h](const std::string& name, const std::vector<uint8_t>& data, const std::string& mime) {
+        if (!h->env || !h->midSaveFile) return false;
+        jstring jn = h->env->NewStringUTF(name.c_str());
+        jstring jm = h->env->NewStringUTF(mime.c_str());
+        jbyteArray arr = h->env->NewByteArray((jsize)data.size());
+        if (!arr) { h->env->DeleteLocalRef(jn); h->env->DeleteLocalRef(jm); clearExc(h->env); return false; }
+        h->env->SetByteArrayRegion(arr, 0, (jsize)data.size(), (const jbyte*)data.data());
+        jboolean ok = h->env->CallBooleanMethod(h->app->activity->clazz, h->midSaveFile, jn, arr, jm);
+        h->env->DeleteLocalRef(jn);
+        h->env->DeleteLocalRef(jm);
         h->env->DeleteLocalRef(arr);
         return !clearExc(h->env) && ok;
     };

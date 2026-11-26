@@ -139,11 +139,12 @@ void App::confirm(const std::string& title, const std::string& msg, std::functio
 
 // ============================================================ меню
 void App::openMainMenu() {
-    pickList("PrismLab", {"Новый проект", "Импортировать модель…", "О PrismLab"},
+    pickList("PrismLab", {"Новый проект", "Импортировать модель…", "Настройки и темы…", "О PrismLab"},
              [this](int i) {
                  switch (i) {
                      case 0: newProject(); break;
                      case 1: if (plat.importModels) { newProject(); plat.importModels(); } else toast("Импорт недоступен"); break;
+                     case 2: openSettings(); break;
                      default:
                          modal_ = Modal();
                          modal_.kind = Modal::Info;
@@ -152,7 +153,7 @@ void App::openMainMenu() {
                          break;
                  }
              },
-             {Icon::Plus, Icon::Model, Icon::Gear});
+             {Icon::Plus, Icon::Model, Icon::Palette, Icon::Gear});
 }
 
 void App::openAddMenu() {
@@ -241,13 +242,14 @@ void App::drawTopBar() {
     if (ui.button(exp, "Экспорт", 1, 14)) {
         int n = scene.proj.frameEnd - scene.proj.frameStart + 1;
         pickList("Экспорт из камеры",
-                 {"Кадр PNG (текущий)", "Видео MP4 (" + std::to_string(n) + " кадров)", "Настройки рендера…"},
+                 {"Кадр PNG (текущий)", "Видео MP4 (" + std::to_string(n) + " кадров)", "Анимация скелета GLB (для Godot)…", "Настройки рендера…"},
                  [this](int i) {
                      if (i == 0) startStillExport();
                      else if (i == 1) startVideoExport();
+                     else if (i == 2) skeletalExportMenu();
                      else tab_ = Tab::Render;
                  },
-                 {Icon::Image, Icon::Film, Icon::Gear});
+                 {Icon::Image, Icon::Film, Icon::Rig, Icon::Gear});
     }
     xr = exp.x - 6 * S;
     Rect rd(xr - bs, y, bs, bs), ud(rd.x - bs - 4 * S, y, bs, bs);
@@ -331,7 +333,7 @@ void App::drawBoneOverlay() {
         for (auto& tr : o->boneTracks) if (tr.node == n && !tr.keys.empty()) any = true;
         float r = (sel ? 9.f : 6.5f) * S;
         Col fill = sel ? theme::orange : (keyed ? theme::keyCol : (any ? Col(1.f, 0.85f, 0.4f, 0.95f) : Col(0.25f, 0.85f, 1.f, 0.95f)));
-        g.circle(sx, sy, r + 1.5f * S, Col(0.02f, 0.02f, 0.08f, 0.8f));
+        g.circle(sx, sy, r + 1.5f * S, Col(0.02f, 0.02f, 0.03f, 0.85f));
         g.circle(sx, sy, r, fill);
         if (sel) g.ring(sx, sy, r + 6 * S, 1.8f * S, theme::orange.alpha(0.9f));
     }
@@ -342,7 +344,7 @@ void App::drawBoneOverlay() {
             std::string nm = m.nodes[selBone_].name.empty() ? "кость " + std::to_string(selBone_) : m.nodes[selBone_].name;
             float fs = 12 * S, w = g.textWidth(nm, fs) + 16 * S;
             Rect r(std::min(std::max(viewRect_.x + 4 * S, sx - w * 0.5f), viewRect_.r() - w - 4 * S), sy - 40 * S, w, 22 * S);
-            g.rect(r, Col(0.04f, 0.03f, 0.1f, 0.75f), 11 * S);
+            g.rect(r, theme::overlay.alpha(1.2f), 11 * S);
             g.textIn(r, nm, fs, theme::text, 1);
         }
     }
@@ -374,7 +376,7 @@ void App::drawViewportOverlay() {
     for (int i = 0; i < 3; i++) {
         Rect r = slot(true, i);
         g.rect(r, back, 10 * S);
-        if (ui.iconBtn(r, ic[i], gizmoMode_ == i, nullptr, gizmoMode_ == i)) gizmoMode_ = i;
+        if (ui.iconBtn(r, ic[i], gizmoEff() == i, nullptr, gizmoEff() == i)) gizmoMode_ = i;
     }
     {
         Rect sr = slot(true, 3);
@@ -393,6 +395,7 @@ void App::drawViewportOverlay() {
         if (!showBones_ && tab_ == Tab::Bones) tab_ = Tab::None;
     }
     if (side(Icon::Eye, false)) focusSelected();
+    if (side(Icon::Layers, false)) viewPresetMenu();
     const Object* sel = scene.find(scene.selected);
     if (sel && sel->type == ObjType::Camera) {
         float w = 150 * S;
@@ -410,7 +413,7 @@ void App::drawViewportOverlay() {
     if (!cap.empty()) {
         float fs = 13 * S, w = std::min(rVP_.w - 16 * S, g.textWidth(cap, fs) + 24 * S);
         Rect r(rVP_.x + 8 * S, rVP_.b() - 36 * S, w, 28 * S);
-        g.rect(r, Col(0.04f, 0.03f, 0.1f, 0.6f), 14 * S);
+        g.rect(r, theme::overlay, 14 * S);
         g.textIn(r, g.fit(cap, fs, w - 14 * S), fs, theme::text, 1);
     }
 }
@@ -498,10 +501,10 @@ void App::drawTimeline() {
         if (boneMode) {
             for (auto& tr : sel->boneTracks)
                 if (tr.node == selBone_)
-                    for (auto& k : tr.keys) diamond(fx((float)k.frame), ky, k.frame == cf ? Col(1, 1, 1, 1) : Col(0.3f, 0.9f, 1.f, 1.f));
+                    for (auto& k : tr.keys) diamond(fx((float)k.frame), ky, k.frame == cf ? theme::text : Col(0.3f, 0.9f, 1.f, 1.f));
             for (auto& k : sel->keys) diamond(fx((float)k.frame), track.y + track.h * 0.88f, theme::keyCol.alpha(0.35f));
         } else {
-            for (auto& k : sel->keys) diamond(fx((float)k.frame), ky, k.frame == cf ? Col(1, 1, 1, 1) : theme::keyCol);
+            for (auto& k : sel->keys) diamond(fx((float)k.frame), ky, k.frame == cf ? theme::text : theme::keyCol);
         }
         for (auto& k : sel->parents) {
             float xx = fx((float)k.frame);
@@ -509,7 +512,7 @@ void App::drawTimeline() {
             g.rect(Rect(xx - 3.5f * S, track.y + 34 * S, 7 * S, 7 * S), c, 3.5f * S);
         }
         for (auto& k : sel->clipKeys) { float xx = fx((float)k.frame); g.rect(Rect(xx - 3 * S, track.y + 4 * S, 6 * S, 4 * S), theme::ok, 1 * S); }
-        for (auto& k : sel->visKeys) { float xx = fx((float)k.frame); g.rect(Rect(xx - 3 * S, track.y + 4 * S, 6 * S, 4 * S), k.visible ? Col(1, 1, 1, 1) : theme::danger, 1 * S); }
+        for (auto& k : sel->visKeys) { float xx = fx((float)k.frame); g.rect(Rect(xx - 3 * S, track.y + 4 * S, 6 * S, 4 * S), k.visible ? theme::text : theme::danger, 1 * S); }
         if (sel->type == ObjType::Effect) {
             float x0 = fx((float)sel->fxStart), x1 = fx((float)sel->fxEnd);
             barR = Rect(x0, track.b() - 18 * S, std::max(10.f * S, x1 - x0), 12 * S);
@@ -583,8 +586,8 @@ void App::drawTabs() {
         if (i == 0) {
             Rect b = r.inset(8 * S, 10 * S);
             if (ui.button(b, "", 1, 12)) openAddMenu();
-            g.icon(Icon::Plus, Rect(b.cx() - 13 * S, b.y + 6 * S, 26 * S, 26 * S), Col(1, 1, 1, 1));
-            g.textIn(Rect(b.x, b.y + b.h * 0.62f, b.w, b.h * 0.3f), "Добавить", 11.5f * S, Col(1, 1, 1, 1), 1);
+            g.icon(Icon::Plus, Rect(b.cx() - 13 * S, b.y + 6 * S, 26 * S, 26 * S), theme::onAccent);
+            g.textIn(Rect(b.x, b.y + b.h * 0.62f, b.w, b.h * 0.3f), "Добавить", 11.5f * S, theme::onAccent, 1);
             continue;
         }
         if (ui.iconLabelBtn(r, tabs[i].i, tabs[i].n, act, 11.5f)) {
@@ -817,8 +820,7 @@ void App::panelObject(const Rect& r) {
                     std::vector<std::string> nn{"Объект целиком"};
                     if (p && p->type == ObjType::Model && p->model >= 0 && p->model < (int)scene.models.size() && scene.models[p->model].model) {
                         const Model& m = *scene.models[p->model].model;
-                        std::vector<char> seen(m.nodes.size(), 0);
-                        for (auto& sk : m.skins) for (int j : sk.joints) if (j >= 0 && j < (int)seen.size() && !seen[j]) { seen[j] = 1; nodes.push_back(j); }
+                        nodes = scene.boneNodes(*p);  // только настоящие суставы
                         for (int j : nodes) nn.push_back("кость: " + (m.nodes[j].name.empty() ? std::to_string(j) : m.nodes[j].name));
                     }
                     auto doAttach = [this, id, pid](int node) {
@@ -1006,6 +1008,29 @@ void App::panelRender(const Rect& r) {
     Rect eb = row(46);
     if (ui.button(cell(eb, 0, 2), "Кадр PNG", 1, 15)) startStillExport();
     if (ui.button(cell(eb, 1, 2), "Видео MP4", 1, 15)) startVideoExport();
+    {
+        Rect gb = row(44);
+        if (ui.button(gb, "Анимация скелета GLB (Godot 4)", 0, 14)) skeletalExportMenu();
+        Rect gh = row(34);
+        ui.label(gh, "Запекает движение костей по кадрам: клип, ключи, рэгдолл. Файл появится в «Загрузки/PrismLab». Ткань в GLB не попадает.", 11, theme::textDim, 0);
+    }
+    {
+        sectionLabel("Формат кадра и видео");
+        Rect fr = row(40);
+        int cur = rs.exportW == rs.exportH ? 2 : (rs.exportH > rs.exportW ? 0 : 1);
+        int k = ui.segmented(fr, {"Вертикальный 9:16", "Горизонтальный 16:9", "Квадрат"}, cur);
+        if (k >= 0 && k != cur) {
+            scene.pushUndo();
+            int longSide = std::max(rs.exportW, rs.exportH), shortSide = std::min(rs.exportW, rs.exportH);
+            auto even = [](float v) { int n = (int)std::lround(v); return std::max(2, n - (n & 1)); };
+            if (k == 0) { rs.exportH = longSide; rs.exportW = even(longSide * 9.f / 16.f); }
+            else if (k == 1) { rs.exportW = longSide; rs.exportH = even(longSide * 9.f / 16.f); }
+            else rs.exportW = rs.exportH = even((float)(cur == 0 ? shortSide : longSide * 9.f / 16.f));
+            autoSaveDirty_ = true;
+        }
+        Rect sw = row(40);
+        if (ui.button(sw, "Повернуть кадр (поменять ширину и высоту)", 0, 13)) { scene.pushUndo(); std::swap(rs.exportW, rs.exportH); autoSaveDirty_ = true; }
+    }
     {
         Rect pr = row(40);
         char b[64];
@@ -1216,7 +1241,7 @@ void App::drawModal() {
     Gfx& g = ui.g;
     float S = ui.S;
     Rect full(0, 0, (float)W_, (float)H_);
-    g.rect(full, Col(0.01f, 0.01f, 0.05f, 0.66f), 0);
+    g.rect(full, theme::shade, 0);
     uint32_t dimId = ui.zone(full);
     bool dimTap = ui.tapOn(dimId, full);
     bool closable = modal_.kind != Modal::Progress;
@@ -1335,7 +1360,7 @@ void App::drawToast() {
     float h = lines.size() * 19 * S + 18 * S;
     Rect r((W_ - w) * 0.5f, home_ ? H_ - h - 40 * S : std::max(rTop_.b() + 8 * S, rTL_.y - h - 10 * S), w, h);
     float a = std::min(1.f, toastT_ * 3.f);
-    g.rect(r, Col(0.05f, 0.04f, 0.14f, 0.96f * a), 12 * S);
+    g.rect(r, theme::popup.alpha(a), 12 * S);
     g.stroke(r, theme::accent.alpha(a), 12 * S, 1.2f * S);
     for (size_t i = 0; i < lines.size(); i++) g.text(lines[i], r.x + 14 * S, r.y + 20 * S + i * 19 * S, fs, theme::text.alpha(a));
 }

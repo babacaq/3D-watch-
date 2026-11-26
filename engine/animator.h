@@ -21,6 +21,9 @@ struct BoneDelta {
 class Animator {
 public:
     std::vector<BoneDelta> deltas;  // применяются после клипа, до расчёта матриц
+    // Принудительные матрицы узлов в пространстве модели (рэгдолл): узлы с ovrHas[i] берут матрицу из ovrMat[i].
+    const std::vector<Mat4>* ovrMat = nullptr;
+    const std::vector<char>* ovrHas = nullptr;
     void setModel(const Model* m);
     // Переключиться на клип с плавным переходом (blend секунд).
     void play(int clip, float blend = 0.25f);

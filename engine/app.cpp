@@ -1,9 +1,11 @@
 #include "app.h"
+#include "glb_export.h"
 
 #include <dirent.h>
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <ctime>
@@ -67,6 +69,7 @@ static FileReader makeReader(const std::string& dir) {
 // ============================================================ инициализация
 bool App::initGL(int w, int h, float density) {
     W_ = w; H_ = h; density_ = density;
+    loadSettings();
     if (!renderer.init()) { ENG_LOG("renderer init failed"); return false; }
     if (!ui.g.init()) { ENG_LOG("ui init failed"); return false; }
     scene.modelLoader = [this](const std::string& src) -> std::unique_ptr<Model> {
@@ -83,6 +86,7 @@ bool App::initGL(int w, int h, float density) {
 void App::shutdown() {
     if (!gl_) return;
     for (auto& m : scene.models) if (m.model) m.model->release();
+    scene.releaseGL();
     scene.particles().release();
     renderer.release();
     ui.g.release();
@@ -277,6 +281,7 @@ void App::advancePlayback(double dt) {
 void App::touch(int action, int id, float x, float y) { events_.push_back({action, id, x, y}); }
 
 bool App::onBack() {
+    if (settingsOpen_ && modal_.kind == Modal::None) { settingsOpen_ = false; return true; }
     if (modal_.kind != Modal::None) {
         if (exp_.kind == Export::None) modal_ = Modal();
         return true;
@@ -331,7 +336,9 @@ View App::currentView(float aspect) const {
     Vec3 e = target_ + Vec3(std::cos(pitch_) * std::sin(yaw_), std::sin(pitch_), std::cos(pitch_) * std::cos(yaw_)) * dist_;
     v.eye = e;
     v.view = lookAt(e, target_, {0, 1, 0});
-    v.proj = perspective(fov_ * kPi / 180.f, aspect, 0.1f, 150.f);
+    // ближняя и дальняя плоскости следуют за расстоянием: вблизи без «срезания», вдали без обрезки сцены
+    float nearP = clampf(dist_ * 0.015f, 0.03f, 0.5f), farP = std::max(150.f, dist_ * 40.f);
+    v.proj = perspective(fov_ * kPi / 180.f, aspect, nearP, farP);
     return v;
 }
 
@@ -389,6 +396,7 @@ void App::rayFromScreen(float x, float y, Vec3& ro, Vec3& rd) const {
 // ============================================================ главный кадр
 void App::frame(double now) {
     if (!gl_) return;
+    now_ = now;
     dt_ = lastTime_ < 0 ? 1.f / 60 : (float)std::min(0.1, std::max(0.0, now - lastTime_));
     lastTime_ = now;
     if (toastT_ > 0) toastT_ -= dt_;
@@ -412,7 +420,8 @@ void App::frame(double now) {
     }
 
     uploadPending();
-    ui.S = density_;
+    ui.S = density_ * settings.uiScale;
+    updateCameraMotion();
     if (!thumbPending_.empty()) { std::string n = thumbPending_; thumbPending_.clear(); if (!home_ || true) makeThumb(n); }
     layout();
     if (home_) {
@@ -421,11 +430,13 @@ void App::frame(double now) {
         glDisable(GL_SCISSOR_TEST);
         glClearColor(theme::bg.r, theme::bg.g, theme::bg.b, 1);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-        ui.begin(W_, H_, density_, primary_, dt_);
-        ui.blocked = modal_.kind != Modal::None;
+        ui.begin(W_, H_, density_ * settings.uiScale, primary_, dt_);
+        ui.blocked = modal_.kind != Modal::None || settingsOpen_;
         drawHome();
-        ui.blocked = false;
+        ui.blocked = modal_.kind != Modal::None;
         glViewport(0, 0, W_, H_);
+        drawSettings();
+        ui.blocked = false;
         drawModal();
         drawToast();
         ui.end();
@@ -436,8 +447,8 @@ void App::frame(double now) {
 
     renderViewport();
 
-    ui.begin(W_, H_, density_, primary_, dt_);
-    ui.blocked = modal_.kind != Modal::None;
+    ui.begin(W_, H_, density_ * settings.uiScale, primary_, dt_);
+    ui.blocked = modal_.kind != Modal::None || settingsOpen_;
     vpId_ = ui.zone(rVP_);
     drawTopBar();
     drawViewportOverlay();
@@ -445,8 +456,10 @@ void App::frame(double now) {
     drawPanel();
     drawTabs();
     if (!ui.blocked) viewportGestures();
-    ui.blocked = false;
+    ui.blocked = modal_.kind != Modal::None;
     glViewport(0, 0, W_, H_);
+    drawSettings();
+    ui.blocked = false;
     drawModal();
     drawToast();
     bool rel = ui.releasedNow();
@@ -461,8 +474,10 @@ void App::frame(double now) {
 
 // ============================================================ жесты
 void App::orbitGesture(float dx, float dy, float zoom, float panX, float panY) {
-    yaw_ -= dx * 0.006f;
-    pitch_ = clampf(pitch_ + dy * 0.006f, -1.45f, 1.5f);
+    float sens = zoom > 0.f || panX != 0.f || panY != 0.f ? 1.f : clampf(settings.orbitSens, 0.2f, 3.f);
+    if (dx != 0.f || dy != 0.f) goalOn_ = false;
+    yaw_ -= dx * 0.006f * sens;
+    pitch_ = clampf(pitch_ + dy * 0.006f * sens * (settings.invertY ? -1.f : 1.f), -1.45f, 1.5f);
     if (zoom > 0.f) dist_ = clampf(dist_ * zoom, 0.4f, 80.f);
     if (panX != 0.f || panY != 0.f) {
         float k = dist_ * 2.f * std::tan(fov_ * kPi / 360.f) / std::max(1.f, viewRect_.h);
@@ -507,8 +522,48 @@ void App::focusSelected() {
         p = (mn + mx) * 0.5f;
         size = std::max(0.5f, length(mx - mn));
     }
-    target_ = p;
-    dist_ = clampf(size * 1.7f, 1.5f, 60.f);
+    goalTarget_ = p;
+    goalDist_ = clampf(size * 1.7f, 1.5f, 60.f);
+    goalOn_ = true; goalAng_ = false;
+}
+
+void App::viewPreset(int i) {
+    // 0 спереди, 1 сзади, 2 слева, 3 справа, 4 сверху, 5 перспектива
+    static const float yaw[6] = {0.f, kPi, -kPi * 0.5f, kPi * 0.5f, 0.f, 0.55f};
+    static const float pit[6] = {0.04f, 0.04f, 0.04f, 0.04f, 1.45f, 0.32f};
+    i = std::max(0, std::min(5, i));
+    // кратчайший путь по углу
+    float d = yaw[i] - yaw_;
+    while (d > kPi) d -= 2 * kPi;
+    while (d < -kPi) d += 2 * kPi;
+    goalYaw_ = yaw_ + d; goalPitch_ = pit[i];
+    goalTarget_ = target_; goalDist_ = dist_;
+    goalOn_ = true; goalAng_ = true;
+    oVelX_ = oVelY_ = 0;
+}
+
+void App::viewPresetMenu() {
+    pickList("Вид", {"Спереди", "Сзади", "Слева", "Справа", "Сверху", "Перспектива"}, [this](int i) { viewPreset(i); },
+             {Icon::Camera, Icon::Camera, Icon::Camera, Icon::Camera, Icon::Camera, Icon::Cube});
+}
+
+// Плавный переход к цели и инерция после броска.
+void App::updateCameraMotion() {
+    if (goalOn_) {
+        float k = 1.f - std::exp(-dt_ * 9.f);
+        target_ = lerp(target_, goalTarget_, k);
+        dist_ += (goalDist_ - dist_) * k;
+        if (goalAng_) { yaw_ += (goalYaw_ - yaw_) * k; pitch_ += (goalPitch_ - pitch_) * k; }
+        bool done = length(target_ - goalTarget_) < 1e-3f && std::fabs(dist_ - goalDist_) < 1e-3f &&
+                    (!goalAng_ || (std::fabs(yaw_ - goalYaw_) < 2e-3f && std::fabs(pitch_ - goalPitch_) < 2e-3f));
+        if (done) { target_ = goalTarget_; dist_ = goalDist_; if (goalAng_) { yaw_ = goalYaw_; pitch_ = goalPitch_; } goalOn_ = false; }
+    }
+    if ((oVelX_ != 0.f || oVelY_ != 0.f) && gest_ != Gest::Orbit && gest_ != Gest::Pinch && !camView_) {
+        orbitGesture(oVelX_ * dt_, oVelY_ * dt_, 0, 0, 0);
+        float damp = std::exp(-dt_ * 4.5f);
+        oVelX_ *= damp; oVelY_ *= damp;
+        if (std::hypot(oVelX_, oVelY_) < 12.f) oVelX_ = oVelY_ = 0.f;
+    }
 }
 
 void App::alignCameraToView() {
@@ -525,6 +580,7 @@ void App::pickAt(float x, float y) {
         if (!camView_ && so && so->type == ObjType::Model && (showBones_ || tab_ == Tab::Bones)) {
             int node;
             if (boneAtScreen(x, y, node)) { selBone_ = node; return; }
+            selBone_ = -1;  // нажали мимо костей - снимаем выбор кости
         }
     }
     Vec3 ro, rd;
@@ -548,10 +604,24 @@ void App::pickAt(float x, float y) {
 }
 
 // ---------------- гизмо ----------------
+// Гизмо работает на кости, если выбрана кость (иначе двигалось бы всё тело).
+bool App::boneGizmo() const {
+    if (camView_ || selBone_ < 0) return false;
+    if (!(showBones_ || tab_ == Tab::Bones)) return false;
+    const Object* o = scene.find(scene.selected);
+    if (!o || o->type != ObjType::Model || !o->anim || !o->visibleNow) return false;
+    Vec3 p;
+    return scene.boneWorldPos(*o, selBone_, p);
+}
+// Режим гизмо с учётом кости: у кости нет масштаба, поэтому «масштаб» там работает как поворот.
+int App::gizmoEff() const { return boneGizmo() ? (gizmoMode_ == 0 ? 0 : 1) : gizmoMode_; }
+
 void App::gizmoGeometry(Vec3& origin, float& L, Vec3 axes[3]) const {
     const Object* o = scene.find(scene.selected);
-    origin = transformPoint(o->world, {0, 0, 0});
-    if (gizmoMode_ == 2) {
+    const bool bone = boneGizmo();
+    if (bone) scene.boneWorldPos(*o, selBone_, origin);
+    else origin = transformPoint(o->world, {0, 0, 0});
+    if (!bone && gizmoMode_ == 2) {
         axes[0] = normalize(Vec3(o->world.m[0], o->world.m[1], o->world.m[2]));
         axes[1] = normalize(Vec3(o->world.m[4], o->world.m[5], o->world.m[6]));
         axes[2] = normalize(Vec3(o->world.m[8], o->world.m[9], o->world.m[10]));
@@ -569,7 +639,10 @@ void App::gizmoGeometry(Vec3& origin, float& L, Vec3 axes[3]) const {
 int App::gizmoHit(float x, float y) {
     const Object* o = scene.find(scene.selected);
     if (!o || !o->visibleNow) return -1;
-    if (gizmoMode_ == 2 && o->type != ObjType::Model && o->type != ObjType::Effect) return -1;
+    const bool bone = boneGizmo();
+    if (tab_ == Tab::Bones && !bone) return -1;
+    const int gm = gizmoEff();
+    if (gm == 2 && o->type != ObjType::Model && o->type != ObjType::Effect) return -1;
     Vec3 O, ax[3];
     float L;
     gizmoGeometry(O, L, ax);
@@ -577,9 +650,9 @@ int App::gizmoHit(float x, float y) {
     if (!project(O, ox, oy)) return -1;
     float best = ui.dp(24);
     int hitId = -1;
-    if (std::hypot(ox - x, oy - y) < ui.dp(20) && gizmoMode_ != 1) { hitId = 3; best = std::hypot(ox - x, oy - y) - ui.dp(2); }
+    if (std::hypot(ox - x, oy - y) < ui.dp(20) && gm != 1) { hitId = 3; best = std::hypot(ox - x, oy - y) - ui.dp(2); }
     for (int i = 0; i < 3; i++) {
-        if (gizmoMode_ == 1) {
+        if (gm == 1) {
             Vec3 u = ax[(i + 1) % 3], v = ax[(i + 2) % 3];
             float px0 = 0, py0 = 0;
             bool have = false;
@@ -601,11 +674,15 @@ int App::gizmoHit(float x, float y) {
     // начало перетаскивания
     gW0_ = o->world;
     gO0_ = O;
+    if (bone) {
+        gBoneT0_ = Vec3(); gBoneD0_ = Quat();
+        if (!scene.boneDeltaAt(*o, selBone_, (float)curFrame(), gBoneT0_, gBoneD0_)) { gBoneT0_ = Vec3(); gBoneD0_ = Quat(); }
+    }
     gStartX_ = x; gStartY_ = y;
     Vec3 ro, rd;
     rayFromScreen(x, y, ro, rd);
     if (hitId < 3) gAxis_ = ax[hitId];
-    if (gizmoMode_ == 1) {
+    if (gm == 1) {
         Vec3 n = gAxis_;
         float den = dot(n, rd);
         Vec3 h = std::fabs(den) > 0.08f ? ro + rd * (dot(O - ro, n) / den) : O;
@@ -637,7 +714,11 @@ void App::gizmoDrag(float x, float y) {
     rayFromScreen(x, y, ro, rd);
     Vec3 O = gO0_;
     Mat4 W;
-    if (gizmoMode_ == 0) {
+    const bool bone = boneGizmo();
+    const int gm = gizmoEff();
+    Vec3 boneMove;
+    Quat boneRot;
+    if (gm == 0) {
         Vec3 delta;
         if (gizmoActive_ < 3) {
             Vec3 a = gAxis_, w0 = O - ro;
@@ -656,7 +737,8 @@ void App::gizmoDrag(float x, float y) {
             if (length(delta) > 200.f) return;
         }
         W = translation(delta) * gW0_;
-    } else if (gizmoMode_ == 1) {
+        boneMove = delta;
+    } else if (gm == 1) {
         Vec3 n = gAxis_;
         float den = dot(n, rd), ang;
         if (std::fabs(den) > 0.08f) {
@@ -673,6 +755,7 @@ void App::gizmoDrag(float x, float y) {
         } else ang = (x - gStartX_) * 0.01f;
         if (snap_) ang = std::round(ang / (kPi / 12.f)) * (kPi / 12.f);
         W = translation(O) * axisAngle(n, ang) * translation(-O) * gW0_;
+        boneRot = quatAxisAngle(n, ang);
     } else {
         float f;
         Mat4 S;
@@ -695,6 +778,12 @@ void App::gizmoDrag(float x, float y) {
         S.m[0] = sx; S.m[5] = sy; S.m[10] = sz;
         W = gW0_ * S;
     }
+    if (bone) {
+        Vec3 t;
+        Quat d;
+        if (scene.boneFromWorld(*o, selBone_, boneRot, boneMove, gBoneT0_, gBoneD0_, t, d)) writeBonePose(scene, *o, selBone_, curFrame(), t, d);
+        return;
+    }
     scene.setWorld(o->id, W);
     scene.resetEffects();
 }
@@ -702,7 +791,10 @@ void App::gizmoDrag(float x, float y) {
 void App::drawGizmo() {
     const Object* o = scene.find(scene.selected);
     if (!o || !o->visibleNow || gest_ == Gest::Orbit || gest_ == Gest::Pinch) return;
-    if (gizmoMode_ == 2 && o->type != ObjType::Model && o->type != ObjType::Effect) return;
+    const bool bone = boneGizmo();
+    if (tab_ == Tab::Bones && !bone) return;
+    const int gm = gizmoEff();
+    if (gm == 2 && o->type != ObjType::Model && o->type != ObjType::Effect) return;
     Vec3 O, ax[3];
     float L;
     gizmoGeometry(O, L, ax);
@@ -713,7 +805,7 @@ void App::drawGizmo() {
     Vec3 f = normalize(-Vec3(view_.view.m[2], view_.view.m[6], view_.view.m[10]));
     for (int i = 0; i < 3; i++) {
         const float* c = gizmoActive_ == i ? act : cols[i];
-        if (gizmoMode_ == 1) {
+        if (gm == 1) {
             Vec3 u = ax[(i + 1) % 3], v = ax[(i + 2) % 3];
             for (int k = 0; k < 48; k++) {
                 float a0 = 6.2831853f * k / 48.f, a1 = 6.2831853f * (k + 1) / 48.f;
@@ -722,7 +814,7 @@ void App::drawGizmo() {
         } else {
             Vec3 tip = O + ax[i] * L;
             lb.add(O, tip, c, w);
-            if (gizmoMode_ == 0) {
+            if (gm == 0) {
                 Vec3 s = normalize(cross(ax[i], f));
                 Vec3 s2 = cross(ax[i], s);
                 float h = L * 0.14f, r = L * 0.055f;
@@ -741,7 +833,7 @@ void App::drawGizmo() {
             }
         }
     }
-    if (gizmoMode_ != 1) {
+    if (gm != 1) {
         const float* c = gizmoActive_ == 3 ? act : white;
         Vec3 r1 = Vec3(view_.view.m[0], view_.view.m[4], view_.view.m[8]) * (L * 0.1f), u1 = Vec3(view_.view.m[1], view_.view.m[5], view_.view.m[9]) * (L * 0.1f);
         lb.add(O - r1 - u1, O + r1 - u1, c, w); lb.add(O + r1 - u1, O + r1 + u1, c, w);
@@ -760,15 +852,16 @@ void App::viewportGestures() {
     const Ptr* second = nullptr;
     for (auto& p : ptrs_) if (p.id != primaryId_) { second = &p; break; }
     if (ui.pressedNow() && ui.candidate() == vpId_ && rVP_.has(ui.downX(), ui.downY())) {
+        // Гизмо кости/объекта имеет приоритет. Если гизмо не задето, а палец у выбранной кости в режиме поворота —
+        // вращаем кость «трекболом».
+        oVelX_ = oVelY_ = 0.f;  // новое касание гасит инерцию вида
+        int h = gizmoHit(ui.downX(), ui.downY());
         bool boneGrab = false;
-        {
+        if (h < 0 && gizmoEff() == 1 && boneGizmo()) {
             const Object* so = scene.find(scene.selected);
             float bx, by;
-            if (!camView_ && selBone_ >= 0 && so && so->type == ObjType::Model && (showBones_ || tab_ == Tab::Bones) && boneScreenPos(*so, selBone_, bx, by) &&
-                std::hypot(bx - ui.downX(), by - ui.downY()) < ui.dp(40))
-                boneGrab = true;
+            if (boneScreenPos(*so, selBone_, bx, by) && std::hypot(bx - ui.downX(), by - ui.downY()) < ui.dp(34)) boneGrab = true;
         }
-        int h = (boneGrab || tab_ == Tab::Bones) ? -1 : gizmoHit(ui.downX(), ui.downY());
         if (boneGrab) { gest_ = Gest::Bone; ui.claimPointer(); }
         else if (h >= 0) { gest_ = Gest::Gizmo; gizmoActive_ = h; ui.claimPointer(); }
         else gest_ = Gest::Armed;
@@ -788,7 +881,12 @@ void App::viewportGestures() {
             ui.claimPointer();
             float dx = ui.dragDx(), dy = ui.dragDy();
             if (camView_) cameraGesture(dx * 0.004f, dy * 0.004f, 0, 0, 0);
-            else orbitGesture(dx, dy, 0, 0, 0);
+            else {
+                orbitGesture(dx, dy, 0, 0, 0);
+                float inv = 1.f / std::max(0.004f, dt_);
+                oVelX_ = oVelX_ * 0.55f + dx * inv * 0.45f;
+                oVelY_ = oVelY_ * 0.55f + dy * inv * 0.45f;
+            }
             if (camView_) beginEdit();
         }
     } else if (gest_ == Gest::Pinch) {
@@ -806,15 +904,21 @@ void App::viewportGestures() {
         }
     }
     if (ui.releasedNow()) {
-        if (gest_ == Gest::Armed && !ui.moved()) pickAt(ui.px(), ui.py());
+        if (gest_ == Gest::Orbit && (!settings.inertia || std::hypot(oVelX_, oVelY_) < ui.dp(90))) oVelX_ = oVelY_ = 0.f;
+        if (gest_ == Gest::Armed && !ui.moved()) {
+            pickAt(ui.px(), ui.py());
+            if (settings.doubleTapFocus && !camView_ && now_ - lastTapT_ < 0.32 && std::hypot(ui.px() - lastTapX_, ui.py() - lastTapY_) < ui.dp(36)) {
+                if (scene.selected >= 0) focusSelected();
+                lastTapT_ = -10;
+            } else { lastTapT_ = now_; lastTapX_ = ui.px(); lastTapY_ = ui.py(); }
+        }
         if (gest_ == Gest::Gizmo || gest_ == Gest::Bone) { scene.simulateTo((int)std::lround(frameF_)); }
-        if (gest_ == Gest::Bone && !ui.moved()) { int nn; if (!boneAtScreen(ui.px(), ui.py(), nn)) pickAt(ui.px(), ui.py()); }
         gest_ = Gest::None;
         gizmoActive_ = -1;
         editStarted_ = false;
     }
     if (!ui.pointerDown() && !ui.releasedNow()) { gest_ = Gest::None; gizmoActive_ = -1; }
-    if (!ui.blocked && tab_ != Tab::Bones) drawGizmo();
+    if (!ui.blocked) drawGizmo();
 }
 
 // ============================================================ экспорт
@@ -823,6 +927,41 @@ static std::string stamp() {
     char b[32];
     std::strftime(b, sizeof b, "%Y%m%d_%H%M%S", std::localtime(&t));
     return b;
+}
+
+static std::string safeName(std::string s) {
+    for (char& ch : s) if (!(std::isalnum((unsigned char)ch) || ch == '_' || ch == '-' || (unsigned char)ch >= 0x80)) ch = '_';
+    return s.empty() ? "scene" : s;
+}
+
+void App::skeletalExportMenu() {
+    const Object* o = scene.find(scene.selected);
+    if (!o || o->type != ObjType::Model || scene.boneCount(*o) < 2) { toast("Выберите модель со скелетом"); return; }
+    pickList("Экспорт анимации скелета (GLB)",
+             {"Модель + скелет + анимация", "То же, но на месте (без движения по сцене)", "Только скелет и анимация (без сетки)"},
+             [this](int i) { exportSkeletalAnimation(i); }, {Icon::Rig, Icon::Rig, Icon::Bone});
+}
+
+// Запекает позы всех костей по кадрам (клип, ключи костей, рэгдолл) и сохраняет GLB для Godot 4, Unity, Unreal, Blender.
+void App::exportSkeletalAnimation(int mode) {
+    const Object* o = scene.find(scene.selected);
+    if (!o || o->type != ObjType::Model || scene.boneCount(*o) < 2) { toast("Выберите модель со скелетом"); return; }
+    if (!plat.saveFile) { toast("Сохранение файлов недоступно на этом устройстве"); return; }
+    GlbOptions op;
+    op.f0 = scene.proj.frameStart; op.f1 = scene.proj.frameEnd; op.fps = scene.proj.fps;
+    op.mesh = mode != 2; op.rootMotion = mode == 0;
+    op.animName = safeName(o->name);
+    std::string nm = safeName(o->name);
+    std::vector<uint8_t> glb;
+    std::string err;
+    int id = o->id;
+    if (!exportSkeletalGlb(scene, id, op, glb, err)) { toast("Не удалось экспортировать: " + err); return; }
+    scene.resetEffects();
+    scene.evaluate((float)frameF_);
+    scene.simulateTo(curFrame());
+    std::string file = nm + "_" + stamp() + ".glb";
+    if (plat.saveFile(file, glb, "model/gltf-binary")) toast("Сохранено: Загрузки/PrismLab/" + file + " (" + std::to_string(glb.size() / 1024) + " КБ)");
+    else toast("Не удалось сохранить файл");
 }
 
 void App::startStillExport() {
