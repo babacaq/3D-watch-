@@ -35,6 +35,9 @@ struct Host {
     JNIEnv* env = nullptr;
     jmethodID midOpen = nullptr, midTake = nullptr, midSavePng = nullptr, midSaveFile = nullptr, midToast = nullptr;
     jmethodID midVBegin = nullptr, midVFrame = nullptr, midVEnd = nullptr, midVCancel = nullptr;
+    jmethodID midPickDir = nullptr, midResetDir = nullptr, midDirName = nullptr;
+    std::string dirName;       // кэш названия папки экспорта
+    double dirNameAt = -10;    // когда обновляли кэш (сек)
 };
 
 std::string jstr(JNIEnv* env, jstring js) {
@@ -63,6 +66,9 @@ bool attachJni(Host& a) {
     a.midVFrame = a.env->GetMethodID(cls, "videoFrame", "(Ljava/nio/ByteBuffer;III)Z");
     a.midVEnd = a.env->GetMethodID(cls, "videoEnd", "()Z");
     a.midVCancel = a.env->GetMethodID(cls, "videoCancel", "()V");
+    a.midPickDir = a.env->GetMethodID(cls, "pickExportDir", "()V");
+    a.midResetDir = a.env->GetMethodID(cls, "resetExportDir", "()V");
+    a.midDirName = a.env->GetMethodID(cls, "exportDirName", "()Ljava/lang/String;");
     a.env->DeleteLocalRef(cls);
     if (clearExc(a.env)) return false;
     return true;
@@ -103,6 +109,31 @@ void setupPlatform(Host& a) {
         h->env->DeleteLocalRef(jm);
         h->env->DeleteLocalRef(arr);
         return !clearExc(h->env) && ok;
+    };
+    p.pickExportDir = [h]() {
+        if (!h->env || !h->midPickDir) return;
+        h->env->CallVoidMethod(h->app->activity->clazz, h->midPickDir);
+        clearExc(h->env);
+        h->dirNameAt = -10;
+    };
+    p.resetExportDir = [h]() {
+        if (!h->env || !h->midResetDir) return;
+        h->env->CallVoidMethod(h->app->activity->clazz, h->midResetDir);
+        clearExc(h->env);
+        h->dirName.clear();
+        h->dirNameAt = -10;
+    };
+    p.exportDirName = [h]() -> std::string {
+        if (!h->env || !h->midDirName) return std::string();
+        timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        double now = ts.tv_sec + ts.tv_nsec * 1e-9;
+        if (now - h->dirNameAt > 0.5) {  // из UI зовут каждый кадр: опрашиваем Java не чаще двух раз в секунду
+            h->dirNameAt = now;
+            jstring js = (jstring)h->env->CallObjectMethod(h->app->activity->clazz, h->midDirName);
+            if (!clearExc(h->env)) { h->dirName = jstr(h->env, js); if (js) h->env->DeleteLocalRef(js); }
+        }
+        return h->dirName;
     };
     p.videoBegin = [h](int w, int hh, int fps, int mbps, const std::string& name) {
         if (!h->env || !h->midVBegin) return false;

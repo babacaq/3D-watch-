@@ -393,6 +393,10 @@ void Gfx::icon(Icon ic, const Rect& rr, const Col& c) {
         case Icon::Next: FR(0.68f, 0.22f, 0.1f, 0.56f, 0.02f); T(0.2f, 0.22f, 0.2f, 0.78f, 0.64f, 0.5f); break;
         case Icon::ToStart: FR(0.14f, 0.22f, 0.1f, 0.56f, 0.02f); T(0.52f, 0.22f, 0.52f, 0.78f, 0.26f, 0.5f); T(0.86f, 0.22f, 0.86f, 0.78f, 0.58f, 0.5f); break;
         case Icon::ToEnd: FR(0.76f, 0.22f, 0.1f, 0.56f, 0.02f); T(0.48f, 0.22f, 0.48f, 0.78f, 0.74f, 0.5f); T(0.14f, 0.22f, 0.14f, 0.78f, 0.42f, 0.5f); break;
+        case Icon::PrevKey: T(0.36f, 0.2f, 0.36f, 0.8f, 0.06f, 0.5f); T(0.7f, 0.26f, 0.94f, 0.5f, 0.7f, 0.74f); T(0.7f, 0.26f, 0.7f, 0.74f, 0.46f, 0.5f); break;
+        case Icon::NextKey: T(0.64f, 0.2f, 0.64f, 0.8f, 0.94f, 0.5f); T(0.3f, 0.26f, 0.54f, 0.5f, 0.3f, 0.74f); T(0.3f, 0.26f, 0.3f, 0.74f, 0.06f, 0.5f); break;
+        case Icon::Glass: SR(0.14f, 0.14f, 0.72f, 0.72f, 0.03f); L(0.5f, 0.5f, 0.22f, 0.2f); L(0.5f, 0.5f, 0.82f, 0.3f); L(0.5f, 0.5f, 0.6f, 0.84f); L(0.5f, 0.5f, 0.16f, 0.66f); break;
+        case Icon::Moon: ARC(0.5f, 0.5f, 0.34f, 0.9f, PI * 1.55f); L(0.82f, 0.34f, 0.5f, 0.22f); break;
         case Icon::Key: T(0.5f, 0.1f, 0.9f, 0.5f, 0.5f, 0.9f); T(0.5f, 0.1f, 0.5f, 0.9f, 0.1f, 0.5f); break;
         case Icon::KeyAdd: T(0.42f, 0.1f, 0.78f, 0.46f, 0.42f, 0.82f); T(0.42f, 0.1f, 0.42f, 0.82f, 0.06f, 0.46f); L(0.78f, 0.62f, 0.78f, 0.92f); L(0.63f, 0.77f, 0.93f, 0.77f); break;
         case Icon::Move:

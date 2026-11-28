@@ -25,6 +25,7 @@ import java.nio.ByteBuffer;
  */
 final class VideoExporter {
     private final Context ctx;
+    private final ExportDir dir;
     private MediaCodec codec;
     private MediaMuxer muxer;
     private File temp;
@@ -36,8 +37,9 @@ final class VideoExporter {
     private final MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
     private byte[] row = new byte[0];
 
-    VideoExporter(Context ctx) {
+    VideoExporter(Context ctx, ExportDir dir) {
         this.ctx = ctx;
+        this.dir = dir;
     }
 
     boolean begin(int w, int h, int fps, int mbps, String name) {
@@ -197,6 +199,9 @@ final class VideoExporter {
     }
 
     private boolean saveToGallery() {
+        try (InputStream in = new FileInputStream(temp)) {
+            if (dir.copy(name, "video/mp4", in)) return true;
+        } catch (Throwable ignored) { }
         try {
             ContentResolver cr = ctx.getContentResolver();
             ContentValues cv = new ContentValues();

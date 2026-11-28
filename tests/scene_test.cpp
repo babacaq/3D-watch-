@@ -455,6 +455,101 @@ int main(int argc, char** argv) {
     }
 
 
+    // --- ткань на выбранных частях, в том числе на скелетной части ---
+    {
+        Scene r;
+        r.proj.fps = 24; r.proj.frameEnd = 60;
+        int id = r.addModel(makeRig(true), "rig", "Cloak2");
+        Object* o = r.find(id);
+        auto cand = r.clothCandidates(*o);
+        CHECK(cand.size() == 3, "cloth candidates: %zu", cand.size());
+        // только плащ (меш 2)
+        o->cloth.enabled = true; o->cloth.meshes = {2}; o->cloth.pin = 0.12f;
+        r.evaluate(20);
+        bool only = o->clothRt && o->clothRt->meshes.size() == 3 && !o->clothRt->meshes[2].verts.empty() && o->clothRt->meshes[0].verts.empty() && o->clothRt->meshes[1].verts.empty();
+        CHECK(only, "cloth only on chosen part");
+        // скелетная часть (меш 0): верх привязан к кости, которая едет по ключам
+        o->cloth.meshes = {0}; o->cloth.pin = 0.3f;
+        r.setBoneKey(id, 0, 1, Vec3(), Quat());
+        r.setBoneKey(id, 0, 30, Vec3(0.6f, 0, 0), Quat());
+        r.evaluate(30);
+        const MeshData* cm = (o->clothRt && o->clothRt->meshes.size() == 3) ? &o->clothRt->meshes[0] : nullptr;
+        CHECK(cm && !cm->verts.empty(), "skinned cloth built");
+        CHECK(!o->clothRt || o->clothRt->meshes[2].verts.empty(), "deselected part returns to normal");
+        if (cm && !cm->verts.empty()) {
+            CHECK(cm->skin == -1 && cm->modelSpace, "skinned cloth drawn as model-space mesh");
+            bool fin = true;
+            for (auto& v : cm->verts) fin = fin && std::isfinite(v.p[0] + v.p[1] + v.p[2]);
+            CHECK(fin, "skinned cloth finite");
+            float topX = (cm->verts[4].p[0] + cm->verts[5].p[0]) * 0.5f;  // верхняя пара: x = ±0.2 -> среднее 0 + сдвиг кости
+            CHECK(std::fabs(topX - 0.6f) < 0.05f, "pinned top follows bone: %f", topX);
+            CHECK(cm->verts[0].p[1] < 0.12f && cm->verts[0].p[1] > -0.5f, "bottom hangs: %f", cm->verts[0].p[1]);
+        }
+        // сохранение и загрузка выбора частей
+        std::string js = r.toJson();
+        CHECK(js.find("\"parts\":[0]") != std::string::npos, "parts saved");
+    }
+
+    // --- стекло: панель исчезает на кадре удара, осколки падают и лежат на полу ---
+    {
+        Scene r;
+        r.proj.fps = 24; r.proj.frameEnd = 80;
+        int g = r.addGlass();
+        CHECK(r.find(g) && r.find(g)->glass && !r.find(g)->castShadow, "glass flags");
+        int e = r.addEffect(FxKind::Glass);
+        Object* eo = r.find(e);
+        CHECK(eo->fxTarget == g, "effect targets glass");
+        eo->fxStart = 10; eo->fxEnd = 80;
+        r.resetEffects(); r.simulateTo(9);
+        CHECK(r.find(g)->visibleNow && r.particles().shardCount() == 0, "glass whole before hit");
+        r.simulateTo(11);
+        CHECK(!r.find(g)->visibleNow && r.particles().shardCount() > 20, "glass broken after hit: %d", r.particles().shardCount());
+        r.resetEffects(); r.simulateTo(70);
+        int n1 = r.particles().shardCount();
+        r.resetEffects(); for (int f = 1; f <= 70; f++) r.simulateTo(f);
+        CHECK(n1 == r.particles().shardCount() && n1 > 20, "shards deterministic: %d", n1);
+        std::string proj = r.saveProject();
+        CHECK(proj.find("\"glass\":true") != std::string::npos, "glass saved");
+    }
+
+    // --- время суток и фонарик сохраняются ---
+    {
+        Scene r;
+        r.render.todOn = true; r.render.tod = 21.5f;
+        int sp = r.addLight(LightKind::Spot);
+        r.find(sp)->spotAngle = 22.f; r.find(sp)->beam = 0.6f;
+        std::string js = r.toJson();
+        CHECK(js.find("\"todOn\":1") != std::string::npos && js.find("\"spotAngle\":22") != std::string::npos, "tod/spot in json");
+    }
+
+    // --- прицеп к повёрнутому и масштабированному родителю: без скачка, «в точку кости» ---
+    {
+        Scene r;
+        r.proj.fps = 24; r.proj.frameEnd = 60;
+        int ch = r.addModel(loadFile(assets + "/test_skinned.glb"), assets + "/test_skinned.glb", "P");
+        Object* po = r.find(ch);
+        po->t = {1, 0, 2}; po->r = {0, 0.7f, 0}; po->s = {1.6f, 1.6f, 1.6f};
+        int it = r.addPrimitive("cube");
+        r.find(it)->t = {4, 1, 4};
+        r.evaluate(5);
+        Vec3 before = posOf(r, it);
+        CHECK(r.attach(it, ch, 2, 5), "attach scaled parent");
+        r.evaluate(5);
+        CHECK(near3(posOf(r, it), before, 1e-3f), "no jump on attach to scaled parent: %f", length(posOf(r, it) - before));
+        Mat4 w5 = r.find(it)->world;
+        r.evaluate(13);
+        Vec3 bone13; r.boneWorldPos(*po, 2, bone13);
+        CHECK(length(posOf(r, it) - bone13) > 0.01f, "offset item is not on the bone");
+        CHECK(r.attach(it, ch, 2, 13, true), "re-attach snapped");
+        r.evaluate(13);
+        r.boneWorldPos(*po, 2, bone13);
+        CHECK(near3(posOf(r, it), bone13, 2e-3f), "snapped to bone: %f", length(posOf(r, it) - bone13));
+        r.evaluate(25);
+        Vec3 b25; r.boneWorldPos(*po, 2, b25);
+        CHECK(near3(posOf(r, it), b25, 2e-3f), "stays on bone later");
+        (void)w5;
+    }
+
     // --- экспорт скелетной анимации в GLB (для Godot 4) ---
     {
         Scene r;

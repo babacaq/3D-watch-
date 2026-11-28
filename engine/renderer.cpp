@@ -46,7 +46,7 @@ uniform int u_hasTex, u_hasMR, u_hasN, u_hasE, u_hasO, u_alphaMode, u_shadowOn, 
 uniform float u_cutoff, u_metal, u_rough, u_nScale, u_texel, u_shadowSoft, u_pass, u_skyBright, u_outScale;
 uniform vec3 u_emis, u_cam, u_L, u_sunCol, u_skyTop, u_skyHor, u_skyGnd;
 uniform vec4 u_tint; uniform mat4 u_lightVP;
-uniform vec4 u_pl[8]; uniform vec3 u_plc[8];
+uniform vec4 u_pl[8]; uniform vec3 u_plc[8]; uniform vec4 u_sp[8]; uniform float u_spIn[8]; uniform int u_glass;
 out vec4 o;
 const float PI = 3.14159265;
 const vec2 POIS[16] = vec2[](vec2(-0.94201624,-0.39906216), vec2(0.94558609,-0.76890725), vec2(-0.094184101,-0.92938870), vec2(0.34495938,0.29387760),
@@ -102,8 +102,8 @@ mat3 cotangentFrame(vec3 N, vec3 p, vec2 uv){
   return mat3(T * invmax, B * invmax, N);
 }
 vec3 brdf(vec3 N, vec3 V, vec3 L, vec3 diff, vec3 F0, float a2, float NoV){
-  vec3 H = normalize(V + L);
-  float NoL = max(dot(N, L), 0.0), NoH = max(dot(N, H), 0.0), VoH = max(dot(V, H), 0.0);
+  vec3 H = normalize(V + L + vec3(1e-5));
+  float NoL = clamp(dot(N, L), 0.0, 1.0), NoH = clamp(dot(N, H), 0.0, 1.0), VoH = clamp(dot(V, H), 0.0, 1.0);
   float d = NoH * NoH * (a2 - 1.0) + 1.0;
   float D = a2 / (PI * d * d + 1e-6);
   float Vis = 0.5 / (NoL * sqrt(NoV * NoV * (1.0 - a2) + a2) + NoV * sqrt(NoL * NoL * (1.0 - a2) + a2) + 1e-4);
@@ -148,7 +148,9 @@ void main(){
     float w = clamp(1.0 - (d2 * d2) / (r * r * r * r), 0.0, 1.0);
     vec3 Lp = d * inversesqrt(max(d2, 1e-6));
     float nl = max(dot(N, Lp), 0.0);
-    Lo += brdf(N, V, Lp, diff, F0, a2, NoV) * u_plc[i] * (w * w / (d2 + 0.05)) * nl;
+    float cone = 1.0;
+    if (u_sp[i].w > -1.5) { float cd = dot(-Lp, u_sp[i].xyz); cone = smoothstep(u_sp[i].w, u_spIn[i], cd); cone *= cone; }
+    Lo += brdf(N, V, Lp, diff, F0, a2, NoV) * u_plc[i] * (w * w / (d2 + 0.05)) * nl * cone;
   }
   vec3 irr = irradiance(N);
   vec3 R = reflect(-V, N);
@@ -160,6 +162,34 @@ void main(){
     float dist = length(v_w - u_cam);
     vec3 dir = normalize(v_w - u_cam);
     lit = mix(lit, skyAt(vec3(dir.x, 0.0, dir.z)), smoothstep(14.0, 36.0, dist));
+  }
+  if (u_glass != 0) {
+    // стекло: отражение неба и бликов поверх, прозрачность растёт на скользящем угле (Френель)
+    float fr = pow(1.0 - NoV, 4.0);
+    float F = mix(0.04, 1.0, fr);
+    vec3 spec = Lo * 0.0;
+    vec3 Lg = normalize(u_L);
+    vec3 Hg = normalize(V + Lg);
+    float nh = max(dot(N, Hg), 0.0);
+    float sp = pow(nh, 180.0) * 2.5 + pow(nh, 28.0) * 0.12;
+    vec3 sunc = dot(u_sunCol, vec3(1.0)) > 0.0 ? u_sunCol : vec3(0.0);
+    spec += sunc * sp * max(dot(N, Lg), 0.0);
+    vec3 envG = skyAt(R);
+    spec += envG * (0.05 + F * 0.95);
+    for (int i = 0; i < 8; i++) {
+      if (i >= u_nPl) break;
+      vec3 d = u_pl[i].xyz - v_w; float r = u_pl[i].w; float d2 = dot(d, d);
+      float w = clamp(1.0 - (d2 * d2) / (r * r * r * r), 0.0, 1.0);
+      vec3 Lp = d * inversesqrt(max(d2, 1e-6));
+      float cone = 1.0;
+      if (u_sp[i].w > -1.5) { float cd = dot(-Lp, u_sp[i].xyz); cone = smoothstep(u_sp[i].w, u_spIn[i], cd); cone *= cone; }
+      float nhp = max(dot(N, normalize(V + Lp)), 0.0);
+      spec += u_plc[i] * (w * w / (d2 + 0.05)) * (pow(nhp, 120.0) * 1.2 + 0.03 * max(dot(N, Lp), 0.0)) * cone;
+    }
+    float a = clamp(col.a + F * (1.0 - col.a), 0.0, 1.0);
+    vec3 tintc = col.rgb * irr * col.a * 0.8;
+    o = vec4((spec + tintc) * u_outScale, a);
+    return;
   }
   o = vec4(lit * u_outScale, u_alphaMode == 2 ? col.a : 1.0);
 }
@@ -195,7 +225,8 @@ void main(){
 static const char* kSkyFS = R"(#version 300 es
 precision highp float; precision highp sampler2D;
 in vec2 v_uv; out vec4 o;
-uniform mat4 u_invVP; uniform vec3 u_cam, u_L, u_sunCol, u_skyTop, u_skyHor, u_skyGnd; uniform float u_skyBright, u_outScale;
+uniform mat4 u_invVP; uniform vec3 u_cam, u_L, u_sunCol, u_skyTop, u_skyHor, u_skyGnd; uniform float u_skyBright, u_outScale, u_stars, u_moon;
+float h3(vec3 p){ return fract(sin(dot(p, vec3(12.9898, 78.233, 37.719))) * 43758.5453); }
 void main(){
   vec2 ndc = v_uv * 2.0 - 1.0;
   vec4 w = u_invVP * vec4(ndc, 1.0, 1.0);
@@ -205,13 +236,56 @@ void main(){
   vec3 dn = mix(u_skyHor, u_skyGnd, smoothstep(0.0, 0.25, -h));
   vec3 c = (h >= 0.0 ? up : dn) * u_skyBright;
   float sd = max(dot(d, normalize(u_L)), 0.0);
-  c += u_sunCol * (pow(sd, 1500.0) * 8.0 + pow(sd, 40.0) * 0.06);
+  if (u_moon > 0.5) {
+    c += vec3(0.85, 0.92, 1.1) * (smoothstep(0.99935, 0.99965, sd) * 1.1 + pow(sd, 400.0) * 0.06 + pow(sd, 40.0) * 0.015);
+  } else {
+    c += u_sunCol * (pow(sd, 1500.0) * 8.0 + pow(sd, 40.0) * 0.06);
+  }
+  if (u_stars > 0.001 && h > -0.02) {
+    vec3 g = d * 150.0; vec3 id = floor(g); vec3 f = fract(g) - 0.5;
+    float hv = h3(id);
+    float st = step(0.985, hv) * smoothstep(0.42, 0.0, length(f)) * (0.35 + 0.65 * h3(id + 7.0));
+    vec3 sc = mix(vec3(1.0, 0.85, 0.7), vec3(0.7, 0.8, 1.0), h3(id + 3.0));
+    c += sc * st * u_stars * 3.0 * smoothstep(-0.02, 0.15, h);
+  }
   o = vec4(c * u_outScale, 1.0);
 }
 )";
 static const char* kSkyVS = R"(#version 300 es
 out vec2 v_uv;
 void main(){ vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)); v_uv = p; gl_Position = vec4(p * 2.0 - 1.0, 1.0, 1.0); }
+)";
+
+
+static const char* kBeamVS = R"(#version 300 es
+uniform mat4 u_vp; uniform vec3 u_pos, u_dir, u_rx, u_ry; uniform float u_len, u_tan;
+out float v_t; out vec3 v_n; out vec3 v_w;
+void main(){
+  const int N = 28;
+  int tri = gl_VertexID / 3, vi = gl_VertexID - tri * 3;
+  float a0 = 6.2831853 * float(tri) / float(N), a1 = 6.2831853 * float(tri + 1) / float(N);
+  float am = 0.5 * (a0 + a1);
+  vec3 p; vec3 r;
+  if (vi == 0) { r = u_rx * cos(am) + u_ry * sin(am); p = u_pos; v_t = 0.0; }
+  else { float a = vi == 1 ? a0 : a1; r = u_rx * cos(a) + u_ry * sin(a); p = u_pos + u_dir * u_len + r * (u_len * u_tan); v_t = 1.0; }
+  v_n = normalize(r - u_dir * u_tan);
+  v_w = p;
+  gl_Position = u_vp * vec4(p, 1.0);
+}
+)";
+static const char* kBeamFS = R"(#version 300 es
+precision highp float;
+in float v_t; in vec3 v_n; in vec3 v_w;
+uniform vec3 u_cam, u_col, u_dir; uniform float u_k, u_outScale;
+out vec4 o;
+void main(){
+  vec3 V = normalize(u_cam - v_w);
+  float f = abs(dot(normalize(v_n), V));
+  float axl = abs(dot(V, u_dir));
+  float a = u_k * (0.3 + 0.7 * pow(max(f, 0.0), 1.6) + 1.2 * pow(axl, 6.0)) * pow(max(1.0 - v_t, 0.0), 1.4) * smoothstep(0.0, 0.03, v_t);
+  a = min(a, 0.35);
+  o = vec4(u_col * a * u_outScale, 1.0);
+}
 )";
 
 static const char* kSsaoFS = R"(#version 300 es
@@ -513,6 +587,7 @@ bool Renderer::buildPrograms() {
     pbr_ = compile(kPbrVS, kPbrFS, "pbr");
     depthP_ = compile(kDepthVS, kDepthFS, "depth");
     sky_ = compile(kSkyVS, kSkyFS, "sky");
+    beam_ = compile(kBeamVS, kBeamFS, "beam");
     ssao_ = compile(kFullVS, kSsaoFS, "ssao");
     blur_ = compile(kFullVS, kBlurFS, "blur");
     down_ = compile(kFullVS, kDownFS, "down");
@@ -532,7 +607,7 @@ bool Renderer::buildPrograms() {
         L.cam = u("u_cam"); L.L = u("u_L"); L.sunCol = u("u_sunCol"); L.lightVP = u("u_lightVP"); L.texel = u("u_texel");
         L.shadowSoft = u("u_shadowSoft"); L.shadowOn = u("u_shadowOn"); L.pass = u("u_pass");
         L.skyTop = u("u_skyTop"); L.skyHor = u("u_skyHor"); L.skyGnd = u("u_skyGnd"); L.skyBright = u("u_skyBright");
-        L.pl = u("u_pl"); L.plc = u("u_plc"); L.nPl = u("u_nPl"); L.outScale = u("u_outScale"); L.isFloor = u("u_isFloor");
+        L.sp = u("u_sp"); L.spIn = u("u_spIn"); L.glass = u("u_glass"); L.pl = u("u_pl"); L.plc = u("u_plc"); L.nPl = u("u_nPl"); L.outScale = u("u_outScale"); L.isFloor = u("u_isFloor");
         return L;
     };
     L_ = locs(pbr_);
@@ -675,9 +750,9 @@ void Renderer::release() {
     freeSet(rt_); freeSet(st_);
     floorMesh_.release();
     lines_.release();
-    GLuint progs[] = {pbr_, depthP_, sky_, ssao_, blur_, down_, up_, tone_, fxaa_, acc_};
+    GLuint progs[] = {pbr_, depthP_, beam_, sky_, ssao_, blur_, down_, up_, tone_, fxaa_, acc_};
     for (GLuint p : progs) if (p) glDeleteProgram(p);
-    pbr_ = depthP_ = sky_ = ssao_ = blur_ = down_ = up_ = tone_ = fxaa_ = acc_ = 0;
+    pbr_ = depthP_ = beam_ = sky_ = ssao_ = blur_ = down_ = up_ = tone_ = fxaa_ = acc_ = 0;
     if (rawSampler_) glDeleteSamplers(1, &rawSampler_);
     rawSampler_ = 0;
     if (shadowFbo_) glDeleteFramebuffers(1, &shadowFbo_);
@@ -712,8 +787,60 @@ View Renderer::cameraView(const Object& cam, float aspect) {
     return v;
 }
 
+// Небо и солнце по времени суток: полдень, закат и ночь с луной и звёздами.
+void Renderer::applyTimeOfDay(const RenderSettings& r, FrameLights& fl, bool sunObjExists) {
+    float t = std::fmod(std::max(0.f, r.tod), 24.f);
+    float s = std::sin(3.14159265f * (t - 6.f) / 12.f);  // -1 ночь, 0 горизонт, 1 полдень
+    struct K { float s; float top[3], hor[3], gnd[3], br; float sun[3]; float sunK; };
+    static const K ks[] = {
+        {-0.35f, {0.008f, 0.012f, 0.05f}, {0.03f, 0.045f, 0.11f}, {0.015f, 0.018f, 0.03f}, 0.55f, {0.5f, 0.62f, 1.0f}, 0.f},
+        {-0.10f, {0.05f, 0.06f, 0.20f}, {0.40f, 0.22f, 0.32f}, {0.05f, 0.04f, 0.06f}, 0.45f, {1.0f, 0.45f, 0.25f}, 0.f},
+        {0.05f, {0.22f, 0.26f, 0.52f}, {1.00f, 0.50f, 0.28f}, {0.16f, 0.11f, 0.09f}, 0.55f, {1.0f, 0.5f, 0.25f}, 0.55f},
+        {0.30f, {0.24f, 0.36f, 0.72f}, {0.95f, 0.78f, 0.62f}, {0.19f, 0.17f, 0.15f}, 0.6f, {1.0f, 0.82f, 0.6f}, 0.85f},
+        {0.65f, {0.22f, 0.42f, 0.85f}, {0.78f, 0.84f, 0.92f}, {0.20f, 0.19f, 0.18f}, 0.6f, {1.0f, 0.95f, 0.9f}, 1.f},
+    };
+    const int n = (int)(sizeof ks / sizeof ks[0]);
+    int i = 0;
+    while (i < n - 2 && s > ks[i + 1].s) i++;
+    float u = clampf((s - ks[i].s) / (ks[i + 1].s - ks[i].s), 0.f, 1.f);
+    auto mx = [&](float a, float b) { return a + (b - a) * u; };
+    for (int c = 0; c < 3; c++) {
+        fl.skyTop[c] = mx(ks[i].top[c], ks[i + 1].top[c]);
+        fl.skyHor[c] = mx(ks[i].hor[c], ks[i + 1].hor[c]);
+        fl.skyGnd[c] = mx(ks[i].gnd[c], ks[i + 1].gnd[c]);
+    }
+    fl.skyBright = mx(ks[i].br, ks[i + 1].br) * r.skyBrightness / 0.6f;
+    float sunK = mx(ks[i].sunK, ks[i + 1].sunK);
+    Vec3 sunC(mx(ks[i].sun[0], ks[i + 1].sun[0]), mx(ks[i].sun[1], ks[i + 1].sun[1]), mx(ks[i].sun[2], ks[i + 1].sun[2]));
+    fl.stars = clampf((-s - 0.06f) / 0.3f, 0.f, 1.f);
+    // направление: азимут берём у солнца сцены, высота идёт по времени
+    float az = std::atan2(fl.sunDir.z, fl.sunDir.x);
+    if (!sunObjExists) az = 0.8f;
+    float el = s * 1.05f;  // до 60 градусов в полдень
+    bool night = s < 0.0f;
+    const float energy = 3.5f;
+    if (night) {
+        el = std::max(0.35f, -s * 1.1f);
+        az += 3.14159265f;
+        fl.moon = 1.f;
+        fl.hasSun = true;
+        fl.sunCol = Vec3(0.45f, 0.55f, 0.95f) * (0.45f * clampf(-s * 3.f, 0.f, 1.f));
+    } else {
+        el = std::max(0.04f, el);
+        fl.hasSun = true;
+        fl.sunCol = sunC * ((sunObjExists ? fl.sunBase : energy) * sunK);
+    }
+    fl.sunDir = normalize(Vec3(std::cos(el) * std::cos(az), std::sin(el), std::cos(el) * std::sin(az)));
+}
+
 void Renderer::gatherLights(Scene& sc, FrameLights& fl) {
     fl = FrameLights();
+    const RenderSettings& rs = sc.render;
+    std::memcpy(fl.skyTop, rs.skyTop, sizeof fl.skyTop);
+    std::memcpy(fl.skyHor, rs.skyHorizon, sizeof fl.skyHor);
+    std::memcpy(fl.skyGnd, rs.skyGround, sizeof fl.skyGnd);
+    fl.skyBright = rs.skyBrightness;
+    for (int i = 0; i < 8; i++) fl.sp[i * 4 + 3] = -2.f;
     for (auto& op : sc.objects) {
         const Object& o = *op;
         if (o.type != ObjType::Light || !o.visibleNow) continue;
@@ -722,13 +849,23 @@ void Renderer::gatherLights(Scene& sc, FrameLights& fl) {
             fl.hasSun = true;
             fl.sunDir = normalize(transformDir(o.world, {0, 0, 1}));
             fl.sunCol = Vec3(o.lcolor[0], o.lcolor[1], o.lcolor[2]) * o.energy;
+            fl.sunBase = o.energy;
         } else if (fl.n < 6) {
             Vec3 p = transformPoint(o.world, {0, 0, 0});
             fl.pl[fl.n * 4] = p.x; fl.pl[fl.n * 4 + 1] = p.y; fl.pl[fl.n * 4 + 2] = p.z; fl.pl[fl.n * 4 + 3] = std::max(0.5f, o.lradius);
             fl.plc[fl.n * 3] = o.lcolor[0] * o.energy; fl.plc[fl.n * 3 + 1] = o.lcolor[1] * o.energy; fl.plc[fl.n * 3 + 2] = o.lcolor[2] * o.energy;
+            if (o.light == LightKind::Spot) {
+                Vec3 d = normalize(transformDir(o.world, {0, 0, -1}));
+                float ang = clampf(o.spotAngle, 5.f, 85.f) * 3.14159265f / 180.f;
+                float inner = ang * (1.f - clampf(o.spotSoft, 0.f, 0.95f));
+                fl.sp[fl.n * 4] = d.x; fl.sp[fl.n * 4 + 1] = d.y; fl.sp[fl.n * 4 + 2] = d.z; fl.sp[fl.n * 4 + 3] = std::cos(ang);
+                fl.spIn[fl.n] = std::cos(inner);
+                if (o.beam > 0.01f) fl.beams.push_back({p, d, Vec3(o.lcolor[0], o.lcolor[1], o.lcolor[2]), std::max(1.f, o.lradius * 0.8f), std::tan(ang), o.beam});
+            }
             fl.n++;
         }
     }
+    if (rs.todOn) applyTimeOfDay(rs, fl, fl.sunBase > 0.f);
     PointLight fx[8];
     int nf = sc.particles().lights(fx, 8 - fl.n);
     for (int i = 0; i < nf && fl.n < 8; i++) {
@@ -794,7 +931,8 @@ void Renderer::drawModels(Scene& sc, int pass, const Locs& L, const Vec3& eye) {
     for (auto& op : sc.objects) {
         Object& o = *op;
         if (o.type != ObjType::Model || !o.visibleNow || o.model < 0 || o.model >= (int)sc.models.size() || !sc.models[o.model].model || !o.anim) continue;
-        if (pass == 0 && !o.castShadow) continue;
+        if (pass == 0 && (!o.castShadow || o.glass)) continue;
+        if (pass == 1 && o.glass) { bool anyOpaque = false; (void)anyOpaque; }
         list.push_back(&o);
     }
     if (pass == 2)
@@ -815,7 +953,7 @@ void Renderer::drawModels(Scene& sc, int pass, const Locs& L, const Vec3& eye) {
                     mp = &cm;
                 }
                 const MeshData& md = *mp;
-                bool blend = md.alphaMode == 2;
+                bool blend = md.alphaMode == 2 || o.glass;
                 if ((pass == 2) != blend && pass != 0) continue;
                 Mat4 M;
                 bool skinned = md.skin >= 0 && md.skin < (int)o.anim->jointMat.size();
@@ -826,7 +964,7 @@ void Renderer::drawModels(Scene& sc, int pass, const Locs& L, const Vec3& eye) {
                         glUniformMatrix4fv(L.joints, (GLsizei)std::min<size_t>(jm.size(), kMaxJoints), GL_FALSE, jm[0].m);
                         lastSkin = md.skin;
                     }
-                } else M = base * o.anim->world[ni];
+                } else M = md.modelSpace ? base : base * o.anim->world[ni];
                 glUniformMatrix4fv(L.model, 1, GL_FALSE, M.m);
                 glUniform1i(L.skinned, skinned ? 1 : 0);
                 bool tex = md.texture >= 0 && md.texture < (int)m.textures.size() && m.textures[md.texture].id;
@@ -860,7 +998,15 @@ void Renderer::drawModels(Scene& sc, int pass, const Locs& L, const Vec3& eye) {
                         glUniform3f(L.emis, md.emissive[0], md.emissive[1], md.emissive[2]);
                     }
                     glUniform1f(L.nScale, md.normalScale);
-                    if (md.doubleSided) glDisable(GL_CULL_FACE); else glEnable(GL_CULL_FACE);
+                    glUniform1i(L.glass, o.glass ? 1 : 0);
+                    if (o.glass) {
+                        glUniform4f(L.tint, o.color[0], o.color[1], o.color[2], o.glassAlpha);
+                        glUniform1i(L.useVC, 0);
+                        glUniform1f(L.metal, 0.f); glUniform1f(L.rough, 0.03f);
+                        glUniform3f(L.emis, 0.f, 0.f, 0.f);
+                    }
+                    if (pass == 2) glBlendFunc(o.glass ? GL_ONE : GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+                    if (md.doubleSided || o.glass) glDisable(GL_CULL_FACE); else glEnable(GL_CULL_FACE);
                 }
                 md.draw();
             }
@@ -887,23 +1033,56 @@ void Renderer::drawFloor(Scene& sc, const Locs& L) {
 }
 
 void Renderer::drawSky(Scene& sc, const View& v, const FrameLights& fl) {
-    const RenderSettings& r = sc.render;
     glUseProgram(sky_);
     Mat4 inv = inverse(v.proj * v.view);
     glUniformMatrix4fv(glGetUniformLocation(sky_, "u_invVP"), 1, GL_FALSE, inv.m);
     glUniform3f(glGetUniformLocation(sky_, "u_cam"), v.eye.x, v.eye.y, v.eye.z);
     glUniform3f(glGetUniformLocation(sky_, "u_L"), fl.sunDir.x, fl.sunDir.y, fl.sunDir.z);
     glUniform3f(glGetUniformLocation(sky_, "u_sunCol"), fl.sunCol.x * 0.15f, fl.sunCol.y * 0.15f, fl.sunCol.z * 0.15f);
-    glUniform3f(glGetUniformLocation(sky_, "u_skyTop"), r.skyTop[0], r.skyTop[1], r.skyTop[2]);
-    glUniform3f(glGetUniformLocation(sky_, "u_skyHor"), r.skyHorizon[0], r.skyHorizon[1], r.skyHorizon[2]);
-    glUniform3f(glGetUniformLocation(sky_, "u_skyGnd"), r.skyGround[0], r.skyGround[1], r.skyGround[2]);
-    glUniform1f(glGetUniformLocation(sky_, "u_skyBright"), r.skyBrightness);
+    glUniform3f(glGetUniformLocation(sky_, "u_skyTop"), fl.skyTop[0], fl.skyTop[1], fl.skyTop[2]);
+    glUniform3f(glGetUniformLocation(sky_, "u_skyHor"), fl.skyHor[0], fl.skyHor[1], fl.skyHor[2]);
+    glUniform3f(glGetUniformLocation(sky_, "u_skyGnd"), fl.skyGnd[0], fl.skyGnd[1], fl.skyGnd[2]);
+    glUniform1f(glGetUniformLocation(sky_, "u_skyBright"), fl.skyBright);
+    glUniform1f(glGetUniformLocation(sky_, "u_stars"), fl.stars);
+    glUniform1f(glGetUniformLocation(sky_, "u_moon"), fl.moon);
     glUniform1f(glGetUniformLocation(sky_, "u_outScale"), outScale_);
     glDisable(GL_DEPTH_TEST);
     glDepthMask(GL_FALSE);
     fullscreen();
     glDepthMask(GL_TRUE);
     glEnable(GL_DEPTH_TEST);
+}
+
+
+// Видимый луч фонарика: прозрачный конус, ярче по краям вдоль луча и тает к концу.
+void Renderer::drawBeams(const FrameLights& fl, const View& v) {
+    if (fl.beams.empty() || !beam_) return;
+    glUseProgram(beam_);
+    Mat4 vp = v.proj * v.view;
+    glUniformMatrix4fv(glGetUniformLocation(beam_, "u_vp"), 1, GL_FALSE, vp.m);
+    glUniform3f(glGetUniformLocation(beam_, "u_cam"), v.eye.x, v.eye.y, v.eye.z);
+    glUniform1f(glGetUniformLocation(beam_, "u_outScale"), outScale_);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ONE);
+    glDepthMask(GL_FALSE);
+    glDisable(GL_CULL_FACE);
+    glBindVertexArray(emptyVao_ ? emptyVao_ : 0);
+    for (auto& b : fl.beams) {
+        Vec3 up = std::fabs(b.dir.y) > 0.95f ? Vec3(1, 0, 0) : Vec3(0, 1, 0);
+        Vec3 rx = normalize(cross(b.dir, up)), ry = cross(b.dir, rx);
+        glUniform3f(glGetUniformLocation(beam_, "u_pos"), b.pos.x, b.pos.y, b.pos.z);
+        glUniform3f(glGetUniformLocation(beam_, "u_dir"), b.dir.x, b.dir.y, b.dir.z);
+        glUniform3f(glGetUniformLocation(beam_, "u_rx"), rx.x, rx.y, rx.z);
+        glUniform3f(glGetUniformLocation(beam_, "u_ry"), ry.x, ry.y, ry.z);
+        glUniform3f(glGetUniformLocation(beam_, "u_col"), b.col.x, b.col.y, b.col.z);
+        glUniform1f(glGetUniformLocation(beam_, "u_len"), b.len);
+        glUniform1f(glGetUniformLocation(beam_, "u_tan"), b.ang);
+        glUniform1f(glGetUniformLocation(beam_, "u_k"), b.k * 0.5f);
+        glDrawArrays(GL_TRIANGLES, 0, 28 * 3);
+    }
+    glDisable(GL_BLEND);
+    glDepthMask(GL_TRUE);
+    glBindVertexArray(0);
 }
 
 void Renderer::scenePass(Scene& sc, TargetSet& s, const View& v, const Mat4& lightVP, const FrameLights& fl, int pass, bool realtime, const Overlay* ov) {
@@ -926,10 +1105,11 @@ void Renderer::scenePass(Scene& sc, TargetSet& s, const View& v, const Mat4& lig
     glUniform3f(L_.cam, v.eye.x, v.eye.y, v.eye.z);
     glUniform3f(L_.L, fl.sunDir.x, fl.sunDir.y, fl.sunDir.z);
     glUniform3f(L_.sunCol, fl.sunCol.x, fl.sunCol.y, fl.sunCol.z);
-    glUniform3f(L_.skyTop, r.skyTop[0], r.skyTop[1], r.skyTop[2]);
-    glUniform3f(L_.skyHor, r.skyHorizon[0], r.skyHorizon[1], r.skyHorizon[2]);
-    glUniform3f(L_.skyGnd, r.skyGround[0], r.skyGround[1], r.skyGround[2]);
-    glUniform1f(L_.skyBright, r.skyBrightness);
+    glUniform3f(L_.skyTop, fl.skyTop[0], fl.skyTop[1], fl.skyTop[2]);
+    glUniform3f(L_.skyHor, fl.skyHor[0], fl.skyHor[1], fl.skyHor[2]);
+    glUniform3f(L_.skyGnd, fl.skyGnd[0], fl.skyGnd[1], fl.skyGnd[2]);
+    glUniform1f(L_.skyBright, fl.skyBright);
+    glUniform1i(L_.glass, 0);
     glUniform1i(L_.shadowOn, (r.shadows && fl.hasSun && shadowFbo_) ? 1 : 0);
     glUniform1f(L_.texel, 1.f / shadowSize_);
     glUniform1f(L_.shadowSoft, r.shadowSoft);
@@ -952,6 +1132,14 @@ void Renderer::scenePass(Scene& sc, TargetSet& s, const View& v, const Mat4& lig
     for (int i = fl.n; i < 8; i++) { pl[i * 4 + 3] = 1.f; }
     glUniform4fv(L_.pl, 8, pl);
     glUniform3fv(L_.plc, 8, plc);
+    {
+        float spA[32], spI[8];
+        std::memcpy(spA, fl.sp, sizeof spA);
+        std::memcpy(spI, fl.spIn, sizeof spI);
+        for (int i = fl.n; i < 8; i++) spA[i * 4 + 3] = -2.f;
+        glUniform4fv(L_.sp, 8, spA);
+        glUniform1fv(L_.spIn, 8, spI);
+    }
     glUniform1i(L_.isFloor, 0);
 
     if (r.floor) drawFloor(sc, L_);
@@ -964,11 +1152,14 @@ void Renderer::scenePass(Scene& sc, TargetSet& s, const View& v, const Mat4& lig
     glDisable(GL_BLEND);
     glBindVertexArray(0);
 
+    drawBeams(fl, v);
+
     // эффекты
     Vec3 right(v.view.m[0], v.view.m[4], v.view.m[8]), up(v.view.m[1], v.view.m[5], v.view.m[9]);
     sc.particles().setOutputScale(outScale_);
-    float skyL = 0.35f + 0.25f * (fl.sunCol.x + fl.sunCol.y + fl.sunCol.z) / 3.f + 0.4f * r.skyBrightness;
+    float skyL = 0.35f + 0.25f * (fl.sunCol.x + fl.sunCol.y + fl.sunCol.z) / 3.f + 0.4f * fl.skyBright;
     sc.particles().setLightScale(skyL);
+    sc.particles().setSun(fl.sunDir);
     sc.particles().render(vp, right, up, v.eye);
 
     if (realtime && ov) {
@@ -1051,12 +1242,21 @@ void Renderer::buildOverlay(Scene& sc, const View& v, const Overlay& ov) {
                     L.add(pos + d * 0.3f, pos + d * 0.5f, col, lw);
                 }
                 L.add(pos, pos - az * 2.2f, col, lw);
+            } else if (o.light == LightKind::Spot) {
+                Vec3 fwd = az * -1.f;
+                float ang = clampf(o.spotAngle, 5.f, 85.f) * 3.14159265f / 180.f, len = 1.4f, rr = len * std::tan(ang);
+                Vec3 c = pos + fwd * len;
+                circle(c, ax, ay, rr, col, lw);
+                for (int i = 0; i < 4; i++) {
+                    float a = 1.5707963f * i;
+                    L.add(pos, c + ax * (std::cos(a) * rr) + ay * (std::sin(a) * rr), col, lw);
+                }
             } else {
                 circle(pos, ax, az, 0.22f, col, lw);
                 L.add(pos, {pos.x, 0.f, pos.z}, dim, 1.f * px);
             }
         } else if (o.type == ObjType::Effect) {
-            static const float fxc[6][4] = {{1.f, 0.5f, 0.1f, 1.f}, {0.7f, 0.7f, 0.75f, 1.f}, {1.f, 0.9f, 0.3f, 1.f}, {1.f, 0.3f, 0.2f, 1.f}, {1.f, 0.85f, 0.5f, 1.f}, {0.8f, 0.05f, 0.1f, 1.f}};
+            static const float fxc[7][4] = {{1.f, 0.5f, 0.1f, 1.f}, {0.7f, 0.7f, 0.75f, 1.f}, {1.f, 0.9f, 0.3f, 1.f}, {1.f, 0.3f, 0.2f, 1.f}, {1.f, 0.85f, 0.5f, 1.f}, {0.8f, 0.05f, 0.1f, 1.f}, {0.6f, 0.9f, 1.f, 1.f}};
             const float* c2 = sel ? orange : fxc[(int)o.fx];
             float k = 0.2f;
             L.add(pos - ax * k, pos + ax * k, c2, lw); L.add(pos - ay * k, pos + ay * k, c2, lw); L.add(pos - az * k, pos + az * k, c2, lw);

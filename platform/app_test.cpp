@@ -188,6 +188,8 @@ int main(int argc, char** argv) {
         printf("bones: last=%s\n", lastName.c_str());
         tap(lastBone.cx(), lastBone.cy());
     }
+    CHECK(app.modalOpen(), "snap choice open");
+    tapW("item:Поставить в точку кости / объекта");
     CHECK(!app.modalOpen(), "attach done");
     CHECK(sc.isAttached(*sc.find(cube), (float)app.frameNow()), "cube attached");
     shot("06_attached");
@@ -202,8 +204,8 @@ int main(int argc, char** argv) {
     CHECK(!app.atHome(), "still in editor before: // отцепить");
     // отцепить
     app.setTab(Tab::Object); run(3);
-    CHECK(reveal("Отцепить на кадре 100"), "reveal detach");
-    tapW("Отцепить на кадре 100");
+    CHECK(reveal("Отцепить (кадр 100)"), "reveal detach");
+    tapW("Отцепить (кадр 100)");
     CHECK(!sc.isAttached(*sc.find(cube), 100.f), "detached");
     shot("07_detached");
 
@@ -364,6 +366,27 @@ int main(int argc, char** argv) {
         app.loadSettings();
         CHECK(std::fabs(app.settings.uiScale - 1.15f) < 1e-4f && app.settings.invertY, "settings round trip");
         app.settings.uiScale = 1.f; app.settings.invertY = false; app.saveSettings(); app.loadSettings();
+    }
+    // --- сброс настроек кнопкой
+    {
+        app.setTheme(2); app.settings.wallpaper = 3; app.settings.boneLines = true; app.settings.uiScale = 1.2f; app.saveSettings();
+        app.openSettings(); run(4);
+        bool found = false;
+        for (int i = 0; i < 14 && !found; i++) {
+            found = app.ui.rects.count("Сбросить настройки по умолчанию") > 0;
+            Rect rr = found ? app.ui.rects["Сбросить настройки по умолчанию"] : Rect();
+            if (found && (rr.y < 0 || rr.b() > H)) found = false;
+            if (!found) { drag(W / 2, H - 60, W / 2, 140, 8); run(30); }
+        }
+        CHECK(found, "reset button reachable");
+        if (found) {
+            tapW("Сбросить настройки по умолчанию");
+            CHECK(app.modalOpen(), "reset confirm open");
+            tapW("Сбросить");
+            CHECK(!app.modalOpen(), "reset confirmed");
+            CHECK(app.settings.theme == 0 && app.settings.wallpaper == 0 && !app.settings.boneLines && std::fabs(app.settings.uiScale - 1.f) < 1e-4f, "settings back to defaults");
+        }
+        app.closeSettings(); run(3);
     }
     // --- домой и обратно
     app.goHome(); run(4);

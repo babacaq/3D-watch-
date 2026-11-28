@@ -154,7 +154,7 @@ void App::drawHome() {
     Gfx& g = ui.g;
     float S = ui.S;
     if (homeDirty_) refreshHome();
-    g.rectGrad(Rect(0, 0, (float)W_, (float)H_), theme::homeTop, theme::bg, 0);
+    drawWallpaper(Rect(0, 0, (float)W_, (float)H_));
 
     float cw = std::min((float)W_ - 24 * S, 680 * S);
     float x0 = (W_ - cw) * 0.5f;
@@ -163,7 +163,7 @@ void App::drawHome() {
     g.text("PrismLab", x0, topPad + 36 * S, 34 * S, theme::text);
     g.text("Сцены и анимация в кармане", x0, topPad + 58 * S, 13.5f * S, theme::textDim);
     Rect info(x0 + cw - 48 * S, topPad + 8 * S, 48 * S, 48 * S);
-    if (ui.iconBtn(info, Icon::Gear, false, nullptr, true)) openMainMenu();
+    if (ui.iconBtn(info, Icon::Gear, false, nullptr, true)) openSettings();
 
     Rect list(0, topPad + 84 * S, (float)W_, H_ - (topPad + 84 * S));
     uint32_t zone = ui.zone(list);

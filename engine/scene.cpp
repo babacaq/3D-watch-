@@ -183,6 +183,50 @@ int Scene::addPrimitive(const std::string& kind) {
     return id;
 }
 
+int Scene::addGlass() {
+    int id = addPrimitive("cube");
+    Object* o = find(id);
+    if (!o) return id;
+    o->name = uniqueName("Стекло");
+    o->glass = true;
+    o->castShadow = false;
+    o->matOverride = true;
+    o->color[0] = 0.72f; o->color[1] = 0.9f; o->color[2] = 0.95f;
+    o->roughness = 0.03f;
+    o->s = Vec3(0.7f, 1.0f, 0.025f);
+    o->t = Vec3(0, 1.0f, 0);
+    evaluate(frame_);
+    return id;
+}
+
+// Плоскость разбиваемого стекла: из объекта-цели или условная панель 1.4 × 1.4 м в точке эффекта.
+bool Scene::glassPane(const Object& e, Vec3& c, Vec3& u, Vec3& v, Vec3& n, float& hu, float& hv) const {
+    const Object* t = find(e.fxTarget);
+    Vec3 ep = transformPoint(e.world, {0, 0, 0});
+    Vec3 bl, bh;
+    if (t && t->type == ObjType::Model && localBox(*t, bl, bh)) {
+        Mat4 M = t->world * t->fit;
+        Vec3 ax[3] = {normalize(transformDir(M, {1, 0, 0})), normalize(transformDir(M, {0, 1, 0})), normalize(transformDir(M, {0, 0, 1}))};
+        Vec3 ext[3] = {(bh - bl) * 0.5f, Vec3(), Vec3()};
+        Vec3 half = (bh - bl) * 0.5f, mid = (bh + bl) * 0.5f;
+        float len[3] = {length(transformDir(M, {1, 0, 0})), length(transformDir(M, {0, 1, 0})), length(transformDir(M, {0, 0, 1}))};
+        float h[3] = {half.x * len[0], half.y * len[1], half.z * len[2]};
+        (void)ext;
+        int thin = 0;
+        for (int i = 1; i < 3; i++) if (h[i] < h[thin]) thin = i;
+        int a = (thin + 1) % 3, b = (thin + 2) % 3;
+        c = transformPoint(M, mid);
+        n = ax[thin]; u = ax[a]; v = ax[b]; hu = h[a]; hv = h[b];
+        return true;
+    }
+    c = ep;
+    u = normalize(transformDir(e.world, {1, 0, 0}));
+    v = normalize(transformDir(e.world, {0, 1, 0}));
+    n = normalize(transformDir(e.world, {0, 0, 1}));
+    hu = hv = 0.7f;
+    return false;
+}
+
 void Scene::setWorld(int id, const Mat4& W) {
     Object* o = find(id);
     if (!o) return;
@@ -199,8 +243,9 @@ int Scene::addLight(LightKind k) {
     o->id = nextId_++;
     o->type = ObjType::Light;
     o->light = k;
-    o->name = uniqueName(k == LightKind::Sun ? "Солнце" : "Свет");
-    o->energy = k == LightKind::Sun ? 3.5f : 25.f;
+    o->name = uniqueName(k == LightKind::Sun ? "Солнце" : (k == LightKind::Spot ? "Фонарик" : "Свет"));
+    o->energy = k == LightKind::Sun ? 3.5f : (k == LightKind::Spot ? 120.f : 25.f);
+    if (k == LightKind::Spot) { o->lradius = 14.f; o->t = Vec3(1.5f, 1.6f, 2.5f); o->r = Vec3(-0.55f, 0.f, 0.f); }
     o->t = k == LightKind::Sun ? Vec3(4, 8, 4) : Vec3(1.5f, 2.5f, 1.5f);
     int id = o->id;
     objects.emplace_back(o);
@@ -222,17 +267,24 @@ int Scene::addCamera() {
 }
 
 int Scene::addEffect(FxKind k) {
-    static const char* names[] = {"Огонь", "Дым", "Вспышка", "Взрыв", "Искры", "Кровь"};
+    static const char* names[] = {"Огонь", "Дым", "Вспышка", "Взрыв", "Искры", "Кровь", "Разбитое стекло"};
     Object* o = new Object();
     o->id = nextId_++;
     o->type = ObjType::Effect;
     o->fx = k;
     o->name = uniqueName(names[(int)k]);
     o->fxStart = (int)std::lround(frame_);
-    o->fxEnd = k == FxKind::Explosion || k == FxKind::Muzzle || k == FxKind::Blood ? o->fxStart + (k == FxKind::Muzzle ? 24 : 12) : proj.frameEnd;
+    o->fxEnd = k == FxKind::Explosion || k == FxKind::Muzzle || k == FxKind::Blood || k == FxKind::Glass ? o->fxStart + (k == FxKind::Muzzle ? 24 : 12) : proj.frameEnd;
     if (k == FxKind::Muzzle) o->fxRate = 4;
+    if (k == FxKind::Glass) {  // по умолчанию бьёт в последнее добавленное стекло
+        for (auto& q : objects) if (q->glass) { o->fxTarget = q->id; }
+        o->fxPower = 1.f;
+    }
     o->t = {0, 0.2f, 0};
-    if (k == FxKind::Muzzle || k == FxKind::Sparks || k == FxKind::Blood) o->t = {0, 1.f, 0};
+    if (k == FxKind::Muzzle || k == FxKind::Sparks || k == FxKind::Blood || k == FxKind::Glass) o->t = {0, 1.f, 0};
+    if (k == FxKind::Glass) {
+        if (const Object* g = find(o->fxTarget)) { Vec3 gt, gr, gs; localTRS(*g, gt, gr, gs); o->t = gt + Vec3(0, 0, 0.5f); o->r = Vec3(0, 3.14159265f, 0); }
+    }
     int id = o->id;
     objects.emplace_back(o);
     selected = id;
@@ -249,8 +301,8 @@ int Scene::duplicate(int id) {
     o->keys = s->keys; o->parents = s->parents; o->clipKeys = s->clipKeys; o->visKeys = s->visKeys;
     o->model = s->model; o->fit = s->fit; o->matOverride = s->matOverride;
     std::memcpy(o->color, s->color, sizeof o->color);
-    o->metallic = s->metallic; o->roughness = s->roughness; o->emission = s->emission; o->castShadow = s->castShadow;
-    o->light = s->light; std::memcpy(o->lcolor, s->lcolor, sizeof o->lcolor); o->energy = s->energy; o->lradius = s->lradius;
+    o->metallic = s->metallic; o->roughness = s->roughness; o->emission = s->emission; o->castShadow = s->castShadow; o->glass = s->glass; o->glassAlpha = s->glassAlpha; o->fxTarget = s->fxTarget;
+    o->light = s->light; std::memcpy(o->lcolor, s->lcolor, sizeof o->lcolor); o->energy = s->energy; o->lradius = s->lradius; o->spotAngle = s->spotAngle; o->spotSoft = s->spotSoft; o->beam = s->beam;
     o->fovDeg = s->fovDeg; o->fx = s->fx; o->fxStart = s->fxStart; o->fxEnd = s->fxEnd; o->fxScale = s->fxScale; o->fxRate = s->fxRate;
     o->fxVariant = s->fxVariant; o->fxPower = s->fxPower; o->fxPush = s->fxPush; o->phys = s->phys; o->rag = s->rag; o->sec = s->sec; o->cloth = s->cloth; o->boneTracks = s->boneTracks;
     o->name = uniqueName(s->name);
@@ -392,7 +444,7 @@ Mat4 Scene::attachFrom(const Object& p, int node) const {
     return W;
 }
 
-bool Scene::attach(int childId, int parentId, int node, int frame) {
+bool Scene::attach(int childId, int parentId, int node, int frame, bool snap) {
     Object* c = find(childId);
     Object* p = find(parentId);
     if (!c || !p || childId == parentId || wouldCycle(childId, parentId)) return false;
@@ -405,7 +457,13 @@ bool Scene::attach(int childId, int parentId, int node, int frame) {
     }
     ParentKey pk;
     pk.frame = frame; pk.parent = parentId; pk.node = (p->type == ObjType::Model) ? node : -1;
-    pk.offset = inverse(attachFrom(*p, pk.node)) * W;
+    Mat4 AF = attachFrom(*p, pk.node);
+    if (snap) {  // в точку кости: позиция кости, поворот и размер остаются прежними
+        Vec3 t, r, sc;
+        decomposeTRS(W, t, r, sc);
+        W = trs(transformPoint(AF, {0, 0, 0}), quatEuler(r.x, r.y, r.z), sc);
+    }
+    pk.offset = inverse(AF) * W;
     bool done = false;
     for (auto& k : c->parents) if (k.frame == frame) { k = pk; done = true; }
     if (!done) c->parents.push_back(pk);
@@ -544,6 +602,9 @@ void Scene::evaluate(float f) {
     }
     std::vector<char> state(objects.size(), 0);
     for (auto& o : objects) worldOf(*o, f, state);
+    for (auto& o : objects)
+        if (o->type == ObjType::Effect && o->fx == FxKind::Glass && o->visibleNow && f >= (float)o->fxStart)
+            if (Object* tg = find(o->fxTarget)) tg->visibleNow = false;
     if (!baking_) {
         for (auto& o : objects) {
             if (o->type != ObjType::Model) continue;
@@ -597,6 +658,16 @@ void Scene::stepEffects(int f) {
                 case FxKind::Explosion:
                     if (sub == 0 && f == o.fxStart) fx_.explosion(pos, sc, o.fxPower);
                     break;
+                case FxKind::Glass:
+                    if (sub == 0 && f == o.fxStart) {
+                        Vec3 c, u, v, n;
+                        float hu, hv;
+                        glassPane(o, c, u, v, n, hu, hv);
+                        Vec3 imp = pos;
+                        if (find(o.fxTarget)) imp = pos - n * dot(pos - c, n);
+                        fx_.glassBreak(c, u, v, n, hu, hv, imp, dir, o.fxPower, sc);
+                    }
+                    break;
                 case FxKind::Blood:
                     if (o.fxVariant == 0) { if (sub == 0 && f == o.fxStart) fx_.bloodBurst(pos, dir, sc, o.fxPower); }
                     else fx_.bloodFlow(pos, dir, sc, o.fxPower, dt, o.fxAcc);
@@ -610,7 +681,7 @@ void Scene::stepEffects(int f) {
 void Scene::simulateTo(int frame) {
     int warm = 5 * std::max(1, proj.fps);
     bool anyFx = false;
-    for (auto& o : objects) if (o->type == ObjType::Effect) { anyFx = true; if (o->fx == FxKind::Blood) warm = 1 << 20; }  // пятна крови остаются навсегда
+    for (auto& o : objects) if (o->type == ObjType::Effect) { anyFx = true; if (o->fx == FxKind::Blood || o->fx == FxKind::Glass) warm = 1 << 20; }  // пятна крови остаются навсегда
     if (!anyFx) { evaluate((float)frame); simFrame_ = frame; return; }
     if (frame == simFrame_) { evaluate((float)frame); return; }
     int begin;
@@ -773,8 +844,8 @@ uint64_t Scene::physSignature() const {
         const SecondaryProps& sc = o.sec;
         hmix(h, sc.enabled ? 1u : 0u); hf(h, sc.stiffness); hf(h, sc.damping); hf(h, sc.gravity); hf(h, sc.amount);
         const ClothProps& cl = o.cloth;
-        hmix(h, cl.enabled ? 1u : 0u); hmix(h, (uint32_t)cl.pinSide); hf(h, cl.pin); hf(h, cl.stiffness); hf(h, cl.shape); hf(h, cl.damping); hf(h, cl.gravity); hf(h, cl.wind); hf(h, cl.windDir);
-        if (o.type == ObjType::Effect) { hmix(h, (uint32_t)o.fxStart); hf(h, o.fxPower); hf(h, o.fxScale); hmix(h, o.fxPush ? 1u : 0u); }
+        hmix(h, cl.enabled ? 1u : 0u); hmix(h, (uint32_t)cl.pinSide); hf(h, cl.pin); hf(h, cl.stiffness); hf(h, cl.shape); hf(h, cl.damping); hf(h, cl.gravity); hf(h, cl.wind); hf(h, cl.windDir); for (int mi : cl.meshes) hmix(h, (uint32_t)mi + 7u);
+        if (o.type == ObjType::Effect) { hmix(h, (uint32_t)o.fxStart); hf(h, o.fxPower); hf(h, o.fxScale); hmix(h, o.fxPush ? 1u : 0u); hmix(h, (uint32_t)o.fxTarget); }
     }
     return h;
 }
@@ -1028,7 +1099,7 @@ std::string Scene::toJson() const {
     o.key("ao"); o.raw(r.ao ? "true," : "false,"); o.key("aoStrength"); o.num(r.aoStrength); o.raw(",");
     o.key("bloom"); o.raw(r.bloom ? "true," : "false,"); o.key("bloomStrength"); o.num(r.bloomStrength); o.raw(",");
     o.key("shadows"); o.raw(r.shadows ? "true," : "false,"); o.key("shadowSoft"); o.num(r.shadowSoft); o.raw(","); o.key("contact"); o.raw(r.contactShadows ? "true," : "false,");
-    o.key("skyBrightness"); o.num(r.skyBrightness); o.raw(",");
+    o.key("skyBrightness"); o.num(r.skyBrightness); o.raw(","); o.key("todOn"); o.num(r.todOn ? 1 : 0); o.raw(","); o.key("tod"); o.num(r.tod); o.raw(",");
     o.key("skyTop"); o.arr3(r.skyTop); o.raw(","); o.key("skyHorizon"); o.arr3(r.skyHorizon); o.raw(","); o.key("skyGround"); o.arr3(r.skyGround); o.raw(",");
     o.key("floor"); o.raw(r.floor ? "true," : "false,"); o.key("floorColor"); o.arr3(r.floorColor); o.raw(","); o.key("floorRoughness"); o.num(r.floorRoughness); o.raw(",");
     o.key("vignette"); o.raw(r.vignette ? "true," : "false,");
@@ -1075,8 +1146,8 @@ std::string Scene::toJson() const {
         o.raw("],");
         o.key("matOverride"); o.raw(b.matOverride ? "true," : "false,"); o.key("color"); o.arr3(b.color); o.raw(",");
         o.key("metallic"); o.num(b.metallic); o.raw(","); o.key("roughness"); o.num(b.roughness); o.raw(","); o.key("emission"); o.num(b.emission); o.raw(",");
-        o.key("castShadow"); o.raw(b.castShadow ? "true," : "false,");
-        o.key("light"); o.num((int)b.light); o.raw(","); o.key("lcolor"); o.arr3(b.lcolor); o.raw(","); o.key("energy"); o.num(b.energy); o.raw(","); o.key("lradius"); o.num(b.lradius); o.raw(",");
+        o.key("castShadow"); o.raw(b.castShadow ? "true," : "false,"); o.key("glass"); o.raw(b.glass ? "true," : "false,"); o.key("glassAlpha"); o.num(b.glassAlpha); o.raw(","); o.key("fxTarget"); o.num(b.fxTarget); o.raw(",");
+        o.key("light"); o.num((int)b.light); o.raw(","); o.key("lcolor"); o.arr3(b.lcolor); o.raw(","); o.key("energy"); o.num(b.energy); o.raw(","); o.key("lradius"); o.num(b.lradius); o.raw(","); o.key("spotAngle"); o.num(b.spotAngle); o.raw(","); o.key("spotSoft"); o.num(b.spotSoft); o.raw(","); o.key("beam"); o.num(b.beam); o.raw(",");
         o.key("fov"); o.num(b.fovDeg); o.raw(",");
         o.key("fx"); o.num((int)b.fx); o.raw(","); o.key("fxStart"); o.num(b.fxStart); o.raw(","); o.key("fxEnd"); o.num(b.fxEnd); o.raw(",");
         o.key("fxScale"); o.num(b.fxScale); o.raw(","); o.key("fxRate"); o.num(b.fxRate); o.raw(",");
@@ -1094,7 +1165,7 @@ std::string Scene::toJson() const {
         o.key("cloth"); o.raw("{"); o.key("on"); o.raw(b.cloth.enabled ? "true," : "false,"); o.key("pinSide"); o.num(b.cloth.pinSide); o.raw(",");
         o.key("pin"); o.num(b.cloth.pin); o.raw(","); o.key("stiff"); o.num(b.cloth.stiffness); o.raw(","); o.key("shape"); o.num(b.cloth.shape); o.raw(",");
         o.key("damp"); o.num(b.cloth.damping); o.raw(","); o.key("grav"); o.num(b.cloth.gravity); o.raw(","); o.key("wind"); o.num(b.cloth.wind); o.raw(",");
-        o.key("windDir"); o.num(b.cloth.windDir); o.raw("},");
+        o.key("windDir"); o.num(b.cloth.windDir); o.raw(","); o.key("parts"); o.raw("["); for (size_t q = 0; q < b.cloth.meshes.size(); q++) { if (q) o.raw(","); o.num(b.cloth.meshes[q]); } o.raw("]},");
         o.key("bones"); o.raw("[");
         for (size_t k = 0; k < b.boneTracks.size(); k++) {
             const BoneTrack& tr = b.boneTracks[k];
@@ -1153,9 +1224,11 @@ bool Scene::applyScene(const Json& j, std::string* err) {
         jarr3(b["color"], o->color);
         o->metallic = (float)b["metallic"].number(0); o->roughness = (float)b["roughness"].number(0.5); o->emission = (float)b["emission"].number(0);
         o->castShadow = jbool(b["castShadow"], true);
+        o->glass = jbool(b["glass"], false); o->glassAlpha = (float)b["glassAlpha"].number(0.16); o->fxTarget = b["fxTarget"].integer(-1);
         o->light = (LightKind)b["light"].integer(1);
         jarr3(b["lcolor"], o->lcolor);
         o->energy = (float)b["energy"].number(20); o->lradius = (float)b["lradius"].number(8);
+        o->spotAngle = (float)b["spotAngle"].number(30); o->spotSoft = (float)b["spotSoft"].number(0.3); o->beam = (float)b["beam"].number(0.25);
         o->fovDeg = (float)b["fov"].number(40);
         o->fx = (FxKind)clampf((float)b["fx"].integer(0), 0, (float)(kFxKinds - 1));
         o->fxVariant = b["fxVar"].integer(0); o->fxPower = (float)b["fxPower"].number(1); o->fxPush = jbool(b["fxPush"], true);
@@ -1177,6 +1250,7 @@ bool Scene::applyScene(const Json& j, std::string* err) {
             const Json& cj = b["cloth"];
             o->cloth.enabled = jbool(cj["on"], false); o->cloth.pinSide = cj["pinSide"].integer(0); o->cloth.pin = (float)cj["pin"].number(0.12);
             o->cloth.stiffness = (float)cj["stiff"].number(0.8); o->cloth.shape = (float)cj["shape"].number(0.12); o->cloth.damping = (float)cj["damp"].number(0.03);
+            o->cloth.meshes.clear(); for (size_t q = 0; q < cj["parts"].size(); q++) o->cloth.meshes.push_back(cj["parts"][q].integer(0));
             o->cloth.gravity = (float)cj["grav"].number(1); o->cloth.wind = (float)cj["wind"].number(0); o->cloth.windDir = (float)cj["windDir"].number(0);
             for (size_t k = 0; k < b["bones"].size(); k++) {
                 const Json& e = b["bones"][k];
@@ -1212,6 +1286,7 @@ bool Scene::applyScene(const Json& j, std::string* err) {
     render.bloom = jbool(r["bloom"], d.bloom); render.bloomStrength = (float)r["bloomStrength"].number(d.bloomStrength);
     render.shadows = jbool(r["shadows"], d.shadows); render.shadowSoft = (float)r["shadowSoft"].number(d.shadowSoft); render.contactShadows = jbool(r["contact"], d.contactShadows);
     render.skyBrightness = (float)r["skyBrightness"].number(d.skyBrightness);
+    render.todOn = r["todOn"].number(0) != 0; render.tod = (float)r["tod"].number(12);
     jarr3(r["skyTop"], render.skyTop); jarr3(r["skyHorizon"], render.skyHorizon); jarr3(r["skyGround"], render.skyGround);
     render.floor = jbool(r["floor"], d.floor); jarr3(r["floorColor"], render.floorColor); render.floorRoughness = (float)r["floorRoughness"].number(d.floorRoughness);
     render.vignette = jbool(r["vignette"], d.vignette);

@@ -51,6 +51,7 @@ struct MeshData {
     GLuint vao = 0, vbo = 0, ibo = 0;
     bool dynamic = false;  // вершины меняются каждый кадр (ткань): буфер GL_DYNAMIC_DRAW
     bool stale = false;    // вершины на CPU новее, чем в GL-буфере
+    bool modelSpace = false;  // вершины уже в пространстве модели (ткань на скелетном меше): узел меша не применяется
 
     void upload();
     void updateVerts();    // залить вершины в GL-буфер, если они изменились

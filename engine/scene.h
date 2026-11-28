@@ -17,9 +17,9 @@ namespace eng {
 struct Json;
 
 enum class ObjType { Model = 0, Light = 1, Camera = 2, Effect = 3 };
-enum class LightKind { Sun = 0, Point = 1 };
-enum class FxKind { Fire = 0, Smoke = 1, Muzzle = 2, Explosion = 3, Sparks = 4, Blood = 5 };
-constexpr int kFxKinds = 6;
+enum class LightKind { Sun = 0, Point = 1, Spot = 2 };
+enum class FxKind { Fire = 0, Smoke = 1, Muzzle = 2, Explosion = 3, Sparks = 4, Blood = 5, Glass = 6 };
+constexpr int kFxKinds = 7;
 // Вспышка выстрела: 0 пистолет, 1 дробовик, 2 автомат. Кровь: 0 брызги (удар), 1 течёт (рана).
 constexpr int kMuzzleVariants = 3;
 
@@ -101,6 +101,7 @@ struct ClothProps {
     float gravity = 1.f;
     float wind = 0.f;        // м/с
     float windDir = 0.f;     // направление ветра, градусы вокруг Y
+    std::vector<int> meshes; // индексы мешей, на которые действует ткань; пусто = все части без скелета
 };
 
 // Деформированные копии мешей объекта (ткань); GL-буферы заводит и обновляет рендерер.
@@ -132,12 +133,17 @@ struct Object {
     float color[3] = {0.8f, 0.8f, 0.8f};
     float metallic = 0.f, roughness = 0.5f, emission = 0.f;
     bool castShadow = true;
+    bool glass = false;         // стекло: прозрачное, с отражениями; цвет — оттенок
+    float glassAlpha = 0.16f;   // прозрачность стекла (0 — почти невидимое)
 
     // Light
     LightKind light = LightKind::Point;
     float lcolor[3] = {1.f, 0.95f, 0.9f};
     float energy = 20.f;
     float lradius = 8.f;
+    float spotAngle = 30.f;  // фонарик: половина угла конуса, градусы
+    float spotSoft = 0.3f;   // мягкость края 0..1
+    float beam = 0.25f;      // фонарик: видимость луча в воздухе 0..1
 
     // Camera
     float fovDeg = 40.f;
@@ -150,6 +156,7 @@ struct Object {
     int fxVariant = 0;    // вспышка: пистолет/дробовик/автомат; кровь: брызги/течёт
     float fxPower = 1.f;  // сила взрыва, давление крови, яркость вспышки
     bool fxPush = true;   // взрыв толкает объекты с физикой
+    int fxTarget = -1;    // стекло: объект-стекло, которое разбивается (-1 — условная панель в точке эффекта)
 
     // Физика и кости
     PhysProps phys;
@@ -178,6 +185,8 @@ struct RenderSettings {
     bool contactShadows = true;  // мелкие тени у самой земли и в щелях
     int shadowRes = 2048;
     float skyBrightness = 0.6f;
+    bool todOn = false;      // небо и свет по времени суток
+    float tod = 12.f;        // время суток, часы 0..24
     float skyTop[3] = {0.22f, 0.42f, 0.85f};
     float skyHorizon[3] = {0.78f, 0.84f, 0.92f};
     float skyGround[3] = {0.20f, 0.19f, 0.18f};
@@ -229,6 +238,8 @@ public:
     int addLight(LightKind k);
     int addCamera();
     int addEffect(FxKind k);
+    int addGlass();
+    bool glassPane(const Object& e, Vec3& c, Vec3& u, Vec3& v, Vec3& n, float& hu, float& hv) const;
     int duplicate(int id);
     void remove(int id);
     void rename(int id, const std::string& name);
@@ -244,7 +255,7 @@ public:
     bool hasKeyAt(const Object& o, int frame) const;
     void setLocal(int id, Vec3 t, Vec3 r, Vec3 s);  // правка с авто-ключом; для прицеплённых - смещение относительно родителя
     void localTRS(const Object& o, Vec3& t, Vec3& r, Vec3& s) const;  // то, что показывается в панели
-    bool attach(int child, int parent, int node, int frame);
+    bool attach(int child, int parent, int node, int frame, bool snap = false);  // snap: в точку кости, поворот и размер прежние
     bool detach(int child, int frame);
     bool isAttached(const Object& o, float frame) const;
     const ParentKey* activeParent(const Object& o, float frame) const;
@@ -267,7 +278,9 @@ public:
     void bakePhysics();                       // пересчитывается сама при изменении сцены (твёрдые тела, рэгдолл, маятник, ткань)
     bool ragdollBaked(int id) const { auto it = rag_.find(id); return it != rag_.end() && !it->second.mats.empty(); }
     bool clothBaked(int id) const { auto it = cloth_.find(id); return it != cloth_.end() && !it->second.meshes.empty(); }
-    bool clothSupported(const Object& o, std::string* why = nullptr) const;  // есть меши без скелета и их не слишком много
+    bool clothSupported(const Object& o, std::string* why = nullptr) const;
+    std::vector<int> clothCandidates(const Object& o) const;       // меши, которые можно сделать тканью
+    bool clothMeshOn(const Object& o, int mesh) const;             // действует ли ткань на этот меш  // есть меши без скелета и их не слишком много
     void releaseGL();                         // освободить GL-буферы ткани (до удаления контекста)
     bool physicsActive(const Object& o, float f) const;
     int physicsFrames() const { return phys_.last - phys_.first + 1; }

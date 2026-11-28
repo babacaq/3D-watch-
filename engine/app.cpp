@@ -307,14 +307,14 @@ void App::layout() {
     rTop_ = Rect(0, 0, (float)W_, topH);
     bool open = tab_ != Tab::None;
     if (!land_) {
-        float barH = 78 * S, tlH = (open ? 116 : 132) * S;
+        float barH = 78 * S, tlH = ((open ? 150 : 164) + (tlTall_ ? 104 : 0)) * S;
         float panelH = open ? std::min(H_ * 0.36f, 330.f * S) : 0.f;
         rTab_ = Rect(0, H_ - barH, (float)W_, barH);
         rTL_ = Rect(0, rTab_.y - tlH, (float)W_, tlH);
         rPanel_ = Rect(0, rTL_.y - panelH, (float)W_, panelH);
         rVP_ = Rect(0, topH, (float)W_, rPanel_.y - topH);
     } else {
-        float barW = 88 * S, tlH = 112 * S;
+        float barW = 88 * S, tlH = (140 + (tlTall_ ? 100 : 0)) * S;
         float panelW = open ? std::min(W_ * 0.42f, 380.f * S) : 0.f;
         rTab_ = Rect(W_ - barW, topH, barW, H_ - topH);
         rPanel_ = Rect(rTab_.x - panelW, topH, panelW, H_ - topH);

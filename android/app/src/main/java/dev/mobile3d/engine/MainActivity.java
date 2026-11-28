@@ -30,13 +30,16 @@ import java.util.List;
  */
 public class MainActivity extends NativeActivity {
     private static final int REQ_PICK = 1001;
+    private static final int REQ_DIR = 1002;
+    ExportDir exportDir;
     private final List<String> pending = new ArrayList<>();
     private VideoExporter video;
 
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
-        video = new VideoExporter(this);
+        exportDir = new ExportDir(this);
+        video = new VideoExporter(this, exportDir);
         if (android.os.Build.VERSION.SDK_INT >= 28) {
             getWindow().getAttributes().layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
         }
@@ -67,6 +70,7 @@ public class MainActivity extends NativeActivity {
 
     /** Из C++: сохранить PNG в Pictures/PrismLab. */
     public boolean savePng(String name, byte[] png) {
+        if (exportDir.write(name, "image/png", png)) return true;
         try {
             ContentResolver cr = getContentResolver();
             ContentValues cv = new ContentValues();
@@ -92,6 +96,7 @@ public class MainActivity extends NativeActivity {
 
     /** Из C++: сохранить любой файл (GLB и т.п.) в Загрузки/PrismLab. */
     public boolean saveFile(String name, byte[] data, String mime) {
+        if (exportDir.write(name, mime, data)) return true;
         try {
             ContentResolver cr = getContentResolver();
             ContentValues cv = new ContentValues();
@@ -120,6 +125,26 @@ public class MainActivity extends NativeActivity {
     public boolean videoEnd() { return video.end(); }
     public void videoCancel() { video.cancel(); }
 
+    /** Из C++: выбрать папку для экспорта. */
+    public void pickExportDir() {
+        runOnUiThread(() -> {
+            try {
+                Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+                i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                        | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
+                startActivityForResult(i, REQ_DIR);
+            } catch (Exception e) {
+                Toast.makeText(this, "На этом устройстве нет выбора папки", Toast.LENGTH_LONG).show();
+            }
+        });
+    }
+
+    /** Из C++: вернуть папку по умолчанию. */
+    public void resetExportDir() { exportDir.clear(); }
+
+    /** Из C++: как называется выбранная папка (пустая строка: по умолчанию). */
+    public String exportDirName() { return exportDir.label(); }
+
     /** Вызывается из C++ (кнопка «Импорт»). */
     public void openPicker() {
         runOnUiThread(() -> {
@@ -147,6 +172,13 @@ public class MainActivity extends NativeActivity {
     @Override
     protected void onActivityResult(int req, int res, Intent data) {
         super.onActivityResult(req, res, data);
+        if (req == REQ_DIR) {
+            if (res == RESULT_OK) {
+                exportDir.onPicked(data);
+                Toast.makeText(this, "Папка экспорта: " + exportDir.label(), Toast.LENGTH_SHORT).show();
+            }
+            return;
+        }
         if (req != REQ_PICK || res != RESULT_OK || data == null) return;
         List<Uri> uris = new ArrayList<>();
         ClipData cd = data.getClipData();

@@ -99,12 +99,44 @@ void buildWeld(const MeshData& md, Weld& w) {
     w.bends.erase(std::unique(w.bends.begin(), w.bends.end()), w.bends.end());
 }
 
+Vec3 skinPoint(const Vertex& v, const std::vector<Mat4>& jm) {
+    Vec3 p(v.p[0], v.p[1], v.p[2]), acc;
+    float ws = 0.f;
+    for (int k = 0; k < 4; k++) {
+        if (v.w[k] <= 0.f || v.j[k] >= jm.size()) continue;
+        acc = acc + transformPoint(jm[v.j[k]], p) * v.w[k];
+        ws += v.w[k];
+    }
+    return ws > 1e-6f ? acc * (1.f / ws) : p;
+}
+
 constexpr int kMaxClothParticles = 6000;
 constexpr size_t kMaxClothBytes = 96u * 1024u * 1024u;
 
 }  // namespace
 
 // ============================================================ ткань: поддержка
+std::vector<int> Scene::clothCandidates(const Object& o) const {
+    std::vector<int> out;
+    if (o.type != ObjType::Model || o.model < 0 || o.model >= (int)models.size() || !models[o.model].model) return out;
+    const Model& m = *models[o.model].model;
+    for (size_t mi = 0; mi < m.meshes.size(); mi++) {
+        const MeshData& md = m.meshes[mi];
+        if (md.verts.empty() || md.indices.size() < 3) continue;
+        if (md.skin >= (int)m.skins.size()) continue;
+        out.push_back((int)mi);
+    }
+    return out;
+}
+
+bool Scene::clothMeshOn(const Object& o, int mesh) const {
+    if (o.type != ObjType::Model || o.model < 0 || o.model >= (int)models.size() || !models[o.model].model) return false;
+    const Model& m = *models[o.model].model;
+    if (mesh < 0 || mesh >= (int)m.meshes.size() || m.meshes[mesh].verts.empty()) return false;
+    if (o.cloth.meshes.empty()) return m.meshes[mesh].skin < 0;  // по умолчанию: все части без скелета
+    return std::find(o.cloth.meshes.begin(), o.cloth.meshes.end(), mesh) != o.cloth.meshes.end();
+}
+
 bool Scene::clothSupported(const Object& o, std::string* why) const {
     if (o.type != ObjType::Model || o.model < 0 || o.model >= (int)models.size() || !models[o.model].model) {
         if (why) *why = "Ткань работает только для моделей";
@@ -112,19 +144,19 @@ bool Scene::clothSupported(const Object& o, std::string* why) const {
     }
     const Model& m = *models[o.model].model;
     int total = 0, meshes = 0;
-    for (const MeshData& md : m.meshes) {
-        if (md.skin >= 0 || md.verts.empty()) continue;
+    for (size_t mi = 0; mi < m.meshes.size(); mi++) {
+        if (!clothMeshOn(o, (int)mi)) continue;
         Weld w;
-        buildWeld(md, w);
+        buildWeld(m.meshes[mi], w);
         total += w.count();
         meshes++;
     }
     if (meshes == 0) {
-        if (why) *why = "У модели нет частей без скелета. Ткань, волосы и плащ делайте отдельной моделью и прицепляйте к кости";
+        if (why) *why = o.cloth.meshes.empty() ? "Выберите части модели, которые должны быть тканью (кнопка «Выбрать части»)" : "Выбранные части не найдены в модели";
         return false;
     }
     if (total > kMaxClothParticles) {
-        if (why) *why = "Слишком много вершин для ткани (" + std::to_string(total) + ", максимум " + std::to_string(kMaxClothParticles) + ")";
+        if (why) *why = "Слишком много вершин для ткани (" + std::to_string(total) + ", максимум " + std::to_string(kMaxClothParticles) + "). Выберите меньше частей";
         return false;
     }
     return true;
@@ -362,7 +394,8 @@ void Scene::bakeCloth() {
         const ClothProps& cp = o.cloth;
 
         struct Sim {
-            int mesh = 0, node = 0;
+            int mesh = 0, node = 0, skin = -1;
+            std::vector<int> rep;  // частица -> одна из вершин (для скелетной ткани)
             Weld w;
             std::vector<char> pinned;
             std::vector<Vec3> x, xp, goalCur, goalNext;
@@ -374,11 +407,14 @@ void Scene::bakeCloth() {
         for (int ni : m.order)
             for (int mi : m.nodes[ni].meshes) {
                 const MeshData& md = m.meshes[mi];
-                if (md.skin >= 0 || md.verts.empty()) continue;
+                if (!clothMeshOn(o, mi)) continue;
                 Sim s;
                 s.mesh = mi;
                 s.node = ni;
+                s.skin = md.skin;
                 buildWeld(md, s.w);
+                s.rep.assign((size_t)s.w.count(), -1);
+                for (size_t vi = 0; vi < md.verts.size(); vi++) if (s.rep[(size_t)s.w.vmap[vi]] < 0) s.rep[(size_t)s.w.vmap[vi]] = (int)vi;
                 totalP += s.w.count();
                 sims.push_back(std::move(s));
             }
@@ -390,14 +426,24 @@ void Scene::bakeCloth() {
         ClothBake cb;
         cb.first = a;
         cb.last = a + N - 1;
-        auto meshMat = [&](int node) { return o.world * o.fit * (o.anim && node < (int)o.anim->world.size() ? o.anim->world[node] : Mat4()); };
+        auto meshMat = [&](const Sim& s) {
+            if (s.skin >= 0) return o.world * o.fit;  // скелетный меш: вершины считаются в пространстве модели
+            return o.world * o.fit * (o.anim && s.node < (int)o.anim->world.size() ? o.anim->world[s.node] : Mat4());
+        };
+        auto goalOf = [&](const Sim& s, const Mat4& M, int p) {
+            if (s.skin >= 0 && o.anim && s.skin < (int)o.anim->jointMat.size()) {
+                const Vertex& v = m.meshes[(size_t)s.mesh].verts[(size_t)s.rep[(size_t)p]];
+                return transformPoint(M, skinPoint(v, o.anim->jointMat[(size_t)s.skin]));
+            }
+            return transformPoint(M, s.w.rest[(size_t)p]);
+        };
 
         evaluate((float)a);
         for (Sim& s : sims) {
-            s.Mcur = meshMat(s.node);
+            s.Mcur = meshMat(s);
             int P = s.w.count();
             s.goalCur.resize((size_t)P);
-            for (int i = 0; i < P; i++) s.goalCur[i] = transformPoint(s.Mcur, s.w.rest[i]);
+            for (int i = 0; i < P; i++) s.goalCur[i] = goalOf(s, s.Mcur, i);
             s.x = s.goalCur;
             s.xp = s.goalCur;
             s.goalNext = s.goalCur;
@@ -446,8 +492,8 @@ void Scene::bakeCloth() {
             if (i + 1 >= N) break;
             evaluate((float)(f + 1));
             for (Sim& s : sims) {
-                s.Mnext = meshMat(s.node);
-                for (int p = 0; p < s.w.count(); p++) s.goalNext[p] = transformPoint(s.Mnext, s.w.rest[p]);
+                s.Mnext = meshMat(s);
+                for (int p = 0; p < s.w.count(); p++) s.goalNext[p] = goalOf(s, s.Mnext, p);
             }
             for (int sub = 1; sub <= subSteps; sub++) {
                 float al = (float)sub / subSteps;
@@ -522,6 +568,13 @@ void Scene::applyCloth(Object& o, float f) {
         rt.meshes.clear();
         rt.meshes.resize(m.meshes.size());
     }
+    // части, с которых ткань сняли, возвращаются к обычному мешу
+    for (size_t mi = 0; mi < rt.meshes.size(); mi++) {
+        if (rt.meshes[mi].verts.empty()) continue;
+        bool still = false;
+        for (const ClothMeshBake& mb : cb.meshes) if ((size_t)mb.mesh == mi) still = true;
+        if (!still) { rt.meshes[mi].release(); rt.meshes[mi] = MeshData(); }
+    }
     int frame = std::max(cb.first, std::min((int)std::lround(f), cb.last)) - cb.first;
     for (const ClothMeshBake& mb : cb.meshes) {
         if (mb.mesh < 0 || mb.mesh >= (int)m.meshes.size()) continue;
@@ -532,6 +585,7 @@ void Scene::applyCloth(Object& o, float f) {
             dst = src;
             dst.vao = dst.vbo = dst.ibo = 0;  // копия без GL-объектов: их заведёт рендерер
             dst.dynamic = true;
+            if (src.skin >= 0) { dst.skin = -1; dst.modelSpace = true; }  // скелетный меш теперь рисуется как есть, вершины уже в пространстве модели
         }
         size_t base = (size_t)frame * (size_t)mb.particles;
         if (base + (size_t)mb.particles > mb.pos.size()) continue;

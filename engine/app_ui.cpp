@@ -7,12 +7,12 @@
 
 namespace eng {
 
-static const char* kFxNames[] = {"Огонь", "Дым", "Вспышка выстрела", "Взрыв", "Искры", "Кровь"};
+static const char* kFxNames[] = {"Огонь", "Дым", "Вспышка выстрела", "Взрыв", "Искры", "Кровь", "Разбитое стекло"};
 
 static Icon typeIcon(const Object& o) {
     switch (o.type) {
         case ObjType::Model: return Icon::Cube;
-        case ObjType::Light: return o.light == LightKind::Sun ? Icon::Sun : Icon::Bulb;
+        case ObjType::Light: return o.light == LightKind::Sun ? Icon::Sun : (o.light == LightKind::Spot ? Icon::Bolt : Icon::Bulb);
         case ObjType::Camera: return Icon::Camera;
         case ObjType::Effect:
             switch (o.fx) {
@@ -21,6 +21,7 @@ static Icon typeIcon(const Object& o) {
                 case FxKind::Muzzle: return Icon::Bolt;
                 case FxKind::Explosion: return Icon::Flame;
                 case FxKind::Blood: return Icon::Drop;
+                case FxKind::Glass: return Icon::Glass;
                 default: return Icon::Sparks;
             }
     }
@@ -159,17 +160,17 @@ void App::openMainMenu() {
 void App::openAddMenu() {
     pickList("Добавить",
              {"Модель из файла…", "Куб", "Сфера", "Цилиндр", "Конус", "Плоскость", "Солнце", "Точечный свет", "Камера", "Огонь", "Дым", "Искры",
-              "Выстрел: пистолет", "Выстрел: дробовик", "Выстрел: автомат (очередь)", "Взрыв", "Кровь: брызги", "Кровь: течёт"},
+              "Выстрел: пистолет", "Выстрел: дробовик", "Выстрел: автомат (очередь)", "Взрыв", "Кровь: брызги", "Кровь: течёт", "Разбить стекло (эффект)", "Фонарик", "Стекло (панель)"},
              [this](int i) { addItem(i); },
              {Icon::Folder, Icon::Cube, Icon::Cube, Icon::Cube, Icon::Cube, Icon::Cube, Icon::Sun, Icon::Bulb, Icon::Camera, Icon::Flame, Icon::Smoke, Icon::Sparks,
-              Icon::Bolt, Icon::Bolt, Icon::Bolt, Icon::Flame, Icon::Drop, Icon::Drop});
+              Icon::Bolt, Icon::Bolt, Icon::Bolt, Icon::Flame, Icon::Drop, Icon::Drop, Icon::Glass, Icon::Bolt, Icon::Glass});
 }
 
 void App::addFxMenu() {
     pickList("Добавить эффект",
-             {"Огонь", "Дым", "Искры", "Выстрел: пистолет", "Выстрел: дробовик", "Выстрел: автомат (очередь)", "Взрыв", "Кровь: брызги", "Кровь: течёт"},
+             {"Огонь", "Дым", "Искры", "Выстрел: пистолет", "Выстрел: дробовик", "Выстрел: автомат (очередь)", "Взрыв", "Кровь: брызги", "Кровь: течёт", "Разбить стекло"},
              [this](int k) { addItem(9 + k); },
-             {Icon::Flame, Icon::Smoke, Icon::Sparks, Icon::Bolt, Icon::Bolt, Icon::Bolt, Icon::Flame, Icon::Drop, Icon::Drop});
+             {Icon::Flame, Icon::Smoke, Icon::Sparks, Icon::Bolt, Icon::Bolt, Icon::Bolt, Icon::Flame, Icon::Drop, Icon::Drop, Icon::Glass});
 }
 
 void App::addItem(int i) {
@@ -207,12 +208,15 @@ void App::addItem(int i) {
             }
             break;
         }
+        case 18: id = scene.addEffect(FxKind::Glass); break;
+        case 19: id = scene.addLight(LightKind::Spot); break;
+        case 20: id = scene.addGlass(); break;
     }
     uploadPending();
     if (id >= 0) {
         // новые объекты появляются в точке, на которую смотрит камера вида
         Object* o = scene.find(id);
-        if (o && i != 8 && i != 6) {
+        if (o && i != 8 && i != 6 && i != 18) {
             Vec3 t, r, s;
             scene.localTRS(*o, t, r, s);
             if (o->type == ObjType::Model || o->type == ObjType::Effect || o->type == ObjType::Light) {
@@ -305,8 +309,9 @@ void App::drawBoneOverlay() {
     std::vector<char> isBone(m.nodes.size(), 0);
     for (int n : bones) isBone[n] = 1;
     int cf = curFrame();
-    // кости: линия от родителя к суставу
+    // кости: по умолчанию только точки; линии к родителю включаются в настройках, у выбранной кости линия есть всегда
     for (int n : bones) {
+        if (!settings.boneLines && n != selBone_) continue;
         float sx, sy;
         if (!boneScreenPos(*o, n, sx, sy)) continue;
         int p = m.nodes[n].parent;
@@ -316,10 +321,9 @@ void App::drawBoneOverlay() {
             if (boneScreenPos(*o, p, px, py)) {
                 float dx = sx - px, dy = sy - py, len = std::hypot(dx, dy);
                 if (len > 1.f) {
-                    float nx = -dy / len, ny = dx / len, w = std::min(5.f * S, len * 0.18f);
-                    Col c = (n == selBone_) ? theme::orange : Col(0.3f, 0.85f, 1.f, 0.9f);
-                    g.tri(px + nx * w, py + ny * w, px - nx * w, py - ny * w, sx, sy, c.alpha(0.55f));
-                    g.line(px, py, sx, sy, 1.6f * S, c);
+                    bool selB = n == selBone_;
+                    Col c = selB ? theme::orange : Col(0.3f, 0.85f, 1.f, 0.9f);
+                    g.line(px, py, sx, sy, (selB ? 1.6f : 1.1f) * S, c.alpha(selB ? 0.8f : 0.45f));
                 }
             }
         }
@@ -331,10 +335,10 @@ void App::drawBoneOverlay() {
         bool keyed = scene.boneHasKey(*o, n, cf);
         bool any = false;
         for (auto& tr : o->boneTracks) if (tr.node == n && !tr.keys.empty()) any = true;
-        float r = (sel ? 9.f : 6.5f) * S;
+        float r = (sel ? 8.f : 4.2f) * S;
         Col fill = sel ? theme::orange : (keyed ? theme::keyCol : (any ? Col(1.f, 0.85f, 0.4f, 0.95f) : Col(0.25f, 0.85f, 1.f, 0.95f)));
-        g.circle(sx, sy, r + 1.5f * S, Col(0.02f, 0.02f, 0.03f, 0.85f));
-        g.circle(sx, sy, r, fill);
+        g.circle(sx, sy, r + 1.2f * S, Col(0.02f, 0.02f, 0.03f, sel ? 0.85f : 0.55f));
+        g.circle(sx, sy, r, sel ? fill : fill.alpha(0.8f));
         if (sel) g.ring(sx, sy, r + 6 * S, 1.8f * S, theme::orange.alpha(0.9f));
     }
     // подпись выбранной кости
@@ -419,15 +423,75 @@ void App::drawViewportOverlay() {
 }
 
 // ============================================================ таймлайн
+// ---- Таймлайн: строки-дорожки (тело, кости по отдельности, события, эффект); ключи можно тянуть ----
+namespace {
+struct TLRow {
+    int kind = 0;  // 0 всё тело, 1 свёртка костей, 2 кость, 3 эффект, 4 события (прицепы, клипы, видимость)
+    int node = -1;
+    std::string name;
+    std::vector<int> fr;
+    bool dim = false;
+};
+}  // namespace
+
+bool App::tlMoveKey(int kind, int node, int from, int to) {
+    Object* o = scene.find(scene.selected);
+    if (!o || from == to) return false;
+    to = std::max(scene.proj.frameStart, std::min(scene.proj.frameEnd, to));
+    if (to == from) return false;
+    if (kind == 0) {
+        for (auto& k : o->keys) if (k.frame == to) return false;
+        for (auto& k : o->keys) if (k.frame == from) { k.frame = to; break; }
+        std::sort(o->keys.begin(), o->keys.end(), [](const TKey& a, const TKey& b) { return a.frame < b.frame; });
+    } else if (kind == 2) {
+        for (auto& tr : o->boneTracks) {
+            if (tr.node != node) continue;
+            for (auto& k : tr.keys) if (k.frame == to) return false;
+            for (auto& k : tr.keys) if (k.frame == from) { k.frame = to; break; }
+            std::sort(tr.keys.begin(), tr.keys.end(), [](const BoneKey& a, const BoneKey& b) { return a.frame < b.frame; });
+        }
+    } else return false;
+    scene.evaluate(scene.frame());
+    return true;
+}
+
+void App::tlJumpKey(int dir) {
+    Object* o = scene.find(scene.selected);
+    if (!o) return;
+    std::vector<int> fr;
+    bool boneMode = o->type == ObjType::Model && selBone_ >= 0 && (tab_ == Tab::Bones || tlTarget_ == 2);
+    if (boneMode) { for (auto& tr : o->boneTracks) if (tr.node == selBone_) for (auto& k : tr.keys) fr.push_back(k.frame); }
+    else for (auto& k : o->keys) fr.push_back(k.frame);
+    int cf = curFrame(), best = -1;
+    for (int f : fr) {
+        if (dir < 0 && f < cf && (best < 0 || f > best)) best = f;
+        if (dir > 0 && f > cf && (best < 0 || f < best)) best = f;
+    }
+    if (best < 0) { toast(dir < 0 ? "Ключей слева нет" : "Ключей справа нет"); return; }
+    playing_ = false;
+    gotoFrame(best);
+}
+
 void App::drawTimeline() {
     Gfx& g = ui.g;
     float S = ui.S;
     g.rect(rTL_, theme::panel, 0);
     g.rect(Rect(rTL_.x, rTL_.y, rTL_.w, 1), theme::line, 0);
-    float pad = 8 * S, bs = 38 * S, y = rTL_.y + 6 * S, x = rTL_.x + pad;
-    bool wide = rTL_.w > 470 * S;
+    // автоматика: в костях ключи «по частям», вне костей - раскрытие по желанию
+    if (tab_ != tlPrevTab_) {
+        if (tab_ == Tab::Bones) { tlBodyOpen_ = false; tlBonesOpen_ = true; tlTarget_ = 2; }
+        else if (tlPrevTab_ == Tab::Bones) { tlBodyOpen_ = true; tlBonesOpen_ = false; tlTarget_ = 0; }
+        tlPrevTab_ = tab_;
+    }
+    float pad = 8 * S, bs = 34 * S, y = rTL_.y + 5 * S, x = rTL_.x + pad;
+    bool wide = rTL_.w > 560 * S;
     int cf = curFrame();
     int a = scene.proj.frameStart, b = scene.proj.frameEnd;
+    Object* sel = scene.find(scene.selected);
+    bool isModel = sel && sel->type == ObjType::Model && sel->anim;
+    bool boneMode = isModel && selBone_ >= 0 && (tab_ == Tab::Bones || tlTarget_ == 2);
+
+    // ---- кнопки: слева управление временем ----
     if (wide) {
         if (ui.iconBtn(Rect(x, y, bs, bs), Icon::ToStart, false, nullptr, false)) { playing_ = false; gotoFrame(a); }
         x += bs + 2 * S;
@@ -444,20 +508,16 @@ void App::drawTimeline() {
     x += bs + 2 * S;
     if (wide) {
         if (ui.iconBtn(Rect(x, y, bs, bs), Icon::ToEnd, false, nullptr, false)) { playing_ = false; gotoFrame(b); }
-        x += bs + 6 * S;
+        x += bs + 2 * S;
     }
-    char buf[48];
-    std::snprintf(buf, sizeof buf, "%d / %d", cf, b);
-    float fsz = 13 * S;
-    g.text(buf, x + 2 * S, y + bs * 0.5f + fsz * 0.36f, fsz, theme::text);
-
-    // ключи справа
+    // ---- справа: ключи ----
     float rx = rTL_.r() - pad;
-    Rect autoR(rx - 56 * S, y, 56 * S, bs);
-    if (ui.button(autoR, "Авто", scene.autoKey ? 1 : 0, 12.5f)) scene.autoKey = !scene.autoKey;
-    Rect delR(autoR.x - bs - 4 * S, y, bs, bs), addR(delR.x - bs - 4 * S, y, bs, bs);
-    Object* sel = scene.find(scene.selected);
-    bool boneMode = tab_ == Tab::Bones && selBone_ >= 0 && sel && sel->type == ObjType::Model;
+    Rect tallR(rx - 28 * S, y, 28 * S, bs);
+    if (ui.iconBtn(tallR, tlTall_ ? Icon::ChevDown : Icon::ChevUp, false, nullptr, false)) tlTall_ = !tlTall_;
+    Rect autoR(tallR.x - 48 * S - 2 * S, y, 48 * S, bs);
+    if (ui.button(autoR, "Авто", scene.autoKey ? 1 : 0, 12)) scene.autoKey = !scene.autoKey;
+    Rect delR(autoR.x - bs - 2 * S, y, bs, bs), addR(delR.x - bs - 2 * S, y, bs, bs);
+    Rect nkR(addR.x - bs - 6 * S, y, bs, bs), pkR(nkR.x - bs - 2 * S, y, bs, bs);
     if (ui.iconBtn(addR, Icon::KeyAdd, false, nullptr, true) && sel) {
         beginEdit();
         if (boneMode) boneKeyNow();
@@ -470,96 +530,248 @@ void App::drawTimeline() {
         if (!ok) toast("На этом кадре нет ключа");
         editStarted_ = false;
     }
+    if (pkR.x > x + 56 * S) {
+        if (ui.iconBtn(pkR, Icon::PrevKey, false, nullptr, false)) tlJumpKey(-1);
+        if (ui.iconBtn(nkR, Icon::NextKey, false, nullptr, false)) tlJumpKey(+1);
+    }
 
-    // линейка и ключи
-    Rect track(rTL_.x + pad + 6 * S, rTL_.y + 52 * S, rTL_.w - 2 * pad - 12 * S, std::max(40.f * S, rTL_.h - 60 * S));
-    g.rect(track, theme::widget, 10 * S);
-    float span = std::max(1, b - a);
-    auto fx = [&](float f) { return track.x + 12 * S + (f - a) / span * (track.w - 24 * S); };
-    float pxPer = (track.w - 24 * S) / span;
+    // ---- таблица ----
+    float labW = (land_ ? 104 : 86) * S;
+    float rulerY = y + bs + 4 * S, rulerH = 22 * S;
+    float rowH = 26 * S;
+    Rect rulerL(rTL_.x + pad, rulerY, labW, rulerH);
+    Rect track(rTL_.x + pad + labW + 4 * S, rulerY, rTL_.r() - pad - (rTL_.x + pad + labW + 4 * S), rulerH);
+    Rect rowsView(rTL_.x + pad, rulerY + rulerH + 2 * S, rTL_.w - 2 * pad, std::max(rowH, rTL_.b() - 4 * S - (rulerY + rulerH + 2 * S)));
+    float span = (float)std::max(1, b - a);
+    float inL = track.x + 10 * S, inW = std::max(1.f, track.w - 20 * S);
+    auto fxp = [&](float f) { return inL + (f - a) / span * inW; };
+    auto frameAt = [&](float xx) { return a + (int)std::lround(clampf((xx - inL) / inW, 0.f, 1.f) * span); };
+    float pxPer = inW / span;
+
+    // кадр / всего
+    {
+        char buf[48];
+        std::snprintf(buf, sizeof buf, "Кадр %d / %d", cf, b);
+        g.rect(rulerL, theme::widget, 6 * S);
+        g.textIn(rulerL, buf, 11.5f * S, theme::text, 1);
+    }
+    // линейка
+    g.rect(track, theme::widget, 6 * S);
     int steps[] = {1, 2, 5, 10, 20, 25, 50, 100, 200, 500, 1000};
     int step = 1000;
     for (int s : steps) if (pxPer * s >= 34 * S) { step = s; break; }
     for (int f = a; f <= b; f++) {
         bool major = ((f - a) % step) == 0;
         if (!major && pxPer < 6 * S) continue;
-        float xx = fx((float)f);
-        g.rect(Rect(xx - 0.5f * S, track.y + (major ? 4 : 10) * S, 1.f * S, (major ? 12 : 6) * S), theme::textDim.alpha(major ? 0.7f : 0.35f), 0);
-        if (major) {
-            std::string t = std::to_string(f);
-            g.textIn(Rect(xx - 20 * S, track.y + 17 * S, 40 * S, 14 * S), t, 10.5f * S, theme::textDim, 1);
-        }
+        float xx = fxp((float)f);
+        g.rect(Rect(xx - 0.5f * S, track.y + (major ? 3 : 14) * S, 1.f * S, (major ? 9 : 5) * S), theme::textDim.alpha(major ? 0.7f : 0.35f), 0);
+        if (major) g.textIn(Rect(xx - 18 * S, track.y + 11 * S, 36 * S, 11 * S), std::to_string(f), 9.5f * S, theme::textDim, 1);
     }
-    float ky = track.y + track.h * 0.64f, ks = 8.f * S;
+    uint32_t rulerZ = ui.zone(track);
+    if (ui.pointerDown() && ui.pressedId(rulerZ) && !ui.blocked) {
+        ui.takeOwner(rulerZ);
+        int f = frameAt(ui.px());
+        if (f != cf) { playing_ = false; gotoFrame(f); }
+    }
+
+    // ---- строки ----
+    std::vector<TLRow> rows;
+    if (sel) {
+        const Model* m = (isModel && sel->model >= 0 && sel->model < (int)scene.models.size()) ? scene.models[sel->model].model.get() : nullptr;
+        auto boneName = [&](int n) {
+            if (m && n >= 0 && n < (int)m->nodes.size() && !m->nodes[n].name.empty()) return m->nodes[n].name;
+            return "кость " + std::to_string(n);
+        };
+        TLRow body;
+        body.kind = 0;
+        body.name = isModel ? "Всё тело" : "Положение";
+        for (auto& k : sel->keys) body.fr.push_back(k.frame);
+        if (isModel && !tlBodyOpen_) body.dim = true;
+        if (sel->type != ObjType::Effect || !sel->keys.empty()) rows.push_back(body);
+        if (isModel) {
+            std::vector<int> nodes;
+            for (auto& tr : sel->boneTracks) if (!tr.keys.empty()) nodes.push_back(tr.node);
+            if (selBone_ >= 0 && tab_ == Tab::Bones && std::find(nodes.begin(), nodes.end(), selBone_) == nodes.end()) nodes.push_back(selBone_);
+            std::sort(nodes.begin(), nodes.end());
+            if (!nodes.empty()) {
+                bool open = tlBonesOpen_;
+                TLRow hdr;
+                hdr.kind = 1;
+                hdr.name = std::string(open ? "Кости (" : "Кости (") + std::to_string(nodes.size()) + ")";
+                hdr.dim = !open;
+                for (auto& tr : sel->boneTracks) for (auto& k : tr.keys) hdr.fr.push_back(k.frame);
+                rows.push_back(hdr);
+                if (open)
+                    for (int n : nodes) {
+                        TLRow br;
+                        br.kind = 2; br.node = n; br.name = boneName(n);
+                        for (auto& tr : sel->boneTracks) if (tr.node == n) for (auto& k : tr.keys) br.fr.push_back(k.frame);
+                        rows.push_back(br);
+                    }
+            }
+        }
+        if (!sel->parents.empty() || !sel->clipKeys.empty() || !sel->visKeys.empty()) {
+            TLRow ev;
+            ev.kind = 4; ev.name = "События";
+            rows.push_back(ev);
+        }
+        if (sel->type == ObjType::Effect) { TLRow fr; fr.kind = 3; fr.name = "Эффект"; rows.push_back(fr); }
+    }
+    // «тело» свернуто: оставляем тонкую строку-заголовок без ключей
+    float contentH = rows.size() * rowH;
+    g.rect(rowsView, theme::widget.alpha(0.45f), 6 * S);
+    ui.beginScroll(rowsView, scrollTL_, contentH);
+    uint32_t rowsZ = ui.zone(rowsView);
+    float ry0 = rowsView.y - scrollTL_.off;
+    float ks = 6.f * S;
+    auto diamond = [&](float xx, float yy, const Col& c, float k) {
+        g.tri(xx, yy - k, xx + k, yy, xx, yy + k, c);
+        g.tri(xx, yy - k, xx, yy + k, xx - k, yy, c);
+    };
+    if (!sel) {
+        g.textIn(rowsView, "Выберите объект, чтобы увидеть его ключи", 12 * S, theme::textDim, 1);
+    }
     Rect barR, handleL, handleR;
     bool haveBar = false;
-    if (sel) {
-        auto diamond = [&](float xx, float yy, const Col& c) {
-            g.tri(xx, yy - ks, xx + ks, yy, xx, yy + ks, c);
-            g.tri(xx, yy - ks, xx, yy + ks, xx - ks, yy, c);
-        };
-        if (boneMode) {
-            for (auto& tr : sel->boneTracks)
-                if (tr.node == selBone_)
-                    for (auto& k : tr.keys) diamond(fx((float)k.frame), ky, k.frame == cf ? theme::text : Col(0.3f, 0.9f, 1.f, 1.f));
-            for (auto& k : sel->keys) diamond(fx((float)k.frame), track.y + track.h * 0.88f, theme::keyCol.alpha(0.35f));
-        } else {
-            for (auto& k : sel->keys) diamond(fx((float)k.frame), ky, k.frame == cf ? theme::text : theme::keyCol);
+    for (size_t i = 0; i < rows.size(); i++) {
+        const TLRow& r = rows[i];
+        Rect rr(rowsView.x, ry0 + i * rowH, rowsView.w, rowH);
+        if (rr.b() < rowsView.y || rr.y > rowsView.b()) continue;
+        bool isSelRow = (r.kind == 2 && r.node == selBone_) || (r.kind == 0 && tlTarget_ == 0 && !r.dim && !(isModel && tab_ == Tab::Bones));
+        if (i & 1) g.rect(rr, Col(1, 1, 1, 0.025f), 0);
+        if (isSelRow) g.rect(rr, theme::accent.alpha(0.14f), 0);
+        // подпись
+        Rect lab(rr.x + 4 * S, rr.y, labW - 4 * S, rr.h);
+        Col tc = r.dim ? theme::textDim : (isSelRow ? theme::text : theme::text.alpha(0.88f));
+        float indent = r.kind == 2 ? 10.f * S : 0.f;
+        if (r.kind == 1 || (r.kind == 0 && isModel)) {
+            bool open = r.kind == 1 ? tlBonesOpen_ : tlBodyOpen_;
+            g.icon(open ? Icon::ChevDown : Icon::ChevUp, Rect(lab.x - 2 * S, lab.cy() - 7 * S, 14 * S, 14 * S), theme::textDim);
+            indent = 12 * S;
         }
-        for (auto& k : sel->parents) {
-            float xx = fx((float)k.frame);
-            Col c = k.parent >= 0 ? theme::accent2 : Col(1, 0.5f, 0.3f, 1);
-            g.rect(Rect(xx - 3.5f * S, track.y + 34 * S, 7 * S, 7 * S), c, 3.5f * S);
+        g.textIn(Rect(lab.x + indent, lab.y, lab.w - indent, lab.h), g.fit(r.name, 11.5f * S, lab.w - indent - 2 * S), 11.5f * S, tc, 0);
+        g.rect(Rect(rr.x + labW + 2 * S, rr.y + 3 * S, 1, rr.h - 6 * S), theme::line, 0);
+        float cy = rr.cy();
+        if (r.dim && r.kind == 0) {
+            g.rect(Rect(track.x + 6 * S, cy - 0.5f * S, track.w - 12 * S, 1.f * S), theme::textDim.alpha(0.25f), 0);
+            continue;
         }
-        for (auto& k : sel->clipKeys) { float xx = fx((float)k.frame); g.rect(Rect(xx - 3 * S, track.y + 4 * S, 6 * S, 4 * S), theme::ok, 1 * S); }
-        for (auto& k : sel->visKeys) { float xx = fx((float)k.frame); g.rect(Rect(xx - 3 * S, track.y + 4 * S, 6 * S, 4 * S), k.visible ? theme::text : theme::danger, 1 * S); }
-        if (sel->type == ObjType::Effect) {
-            float x0 = fx((float)sel->fxStart), x1 = fx((float)sel->fxEnd);
-            barR = Rect(x0, track.b() - 18 * S, std::max(10.f * S, x1 - x0), 12 * S);
-            handleL = Rect(x0 - 16 * S, barR.y - 8 * S, 32 * S, barR.h + 16 * S);
-            handleR = Rect(barR.r() - 16 * S, barR.y - 8 * S, 32 * S, barR.h + 16 * S);
+        g.rect(Rect(track.x + 4 * S, cy - 0.5f * S, track.w - 8 * S, 1.f * S), theme::line.alpha(0.6f), 0);
+        if (r.kind == 4) {
+            for (auto& k : sel->parents) g.circle(fxp((float)k.frame), cy, 4 * S, k.parent >= 0 ? theme::accent2 : Col(1, 0.5f, 0.3f, 1));
+            for (auto& k : sel->clipKeys) g.rect(Rect(fxp((float)k.frame) - 3 * S, cy - 5 * S, 6 * S, 10 * S), theme::ok, 2 * S);
+            for (auto& k : sel->visKeys) g.rect(Rect(fxp((float)k.frame) - 3 * S, cy - 5 * S, 6 * S, 10 * S), k.visible ? theme::text : theme::danger, 2 * S);
+        } else if (r.kind == 3) {
+            float x0 = fxp((float)sel->fxStart), x1 = fxp((float)sel->fxEnd);
+            barR = Rect(x0, cy - 7 * S, std::max(10.f * S, x1 - x0), 14 * S);
+            handleL = Rect(x0 - 16 * S, barR.y - 6 * S, 32 * S, barR.h + 12 * S);
+            handleR = Rect(barR.r() - 16 * S, barR.y - 6 * S, 32 * S, barR.h + 12 * S);
             haveBar = true;
             g.rect(barR, theme::orange.alpha(0.85f), 5 * S);
             g.rect(Rect(barR.x, barR.y, 4 * S, barR.h), Col(1, 1, 1, 0.9f), 2 * S);
             g.rect(Rect(barR.r() - 4 * S, barR.y, 4 * S, barR.h), Col(1, 1, 1, 0.9f), 2 * S);
-        }
-    }
-    float px = fx((float)cf);
-    g.rect(Rect(px - 1 * S, track.y + 2 * S, 2 * S, track.h - 4 * S), theme::accent2, 0);
-    g.circle(px, track.y + 6 * S, 6 * S, theme::accent2);
-
-    tlId_ = ui.zone(track);
-    bool drag = ui.pointerDown() && ui.pressedId(tlId_) && !ui.blocked;
-    if (drag || ui.tapOn(tlId_, track)) {
-        ui.takeOwner(tlId_);
-        float t = (ui.px() - (track.x + 12 * S)) / std::max(1.f, track.w - 24 * S);
-        int f = a + (int)std::lround(clampf(t, 0.f, 1.f) * span);
-        if (f != cf) { playing_ = false; gotoFrame(f); }
-    }
-    // полоса эффекта: тянуть за края - длительность, за середину - сдвиг по времени
-    if (haveBar && sel) {
-        static float acc = 0;
-        uint32_t idM = ui.zone(barR.inset(0, -6 * S)), idL = ui.zone(handleL), idR = ui.zone(handleR);
-        if (ui.pressedNow()) acc = 0;
-        auto frameAt = [&](float xx) { return a + (int)std::lround(clampf((xx - (track.x + 12 * S)) / std::max(1.f, track.w - 24 * S), 0.f, 1.f) * span); };
-        int id = sel->id;
-        bool changed = false;
-        if (!ui.blocked && ui.pointerDown()) {
-            if (ui.pressedId(idL) && ui.moved()) {
-                ui.takeOwner(idL); beginEdit();
-                sel->fxStart = std::min(frameAt(ui.px()), sel->fxEnd - 1); changed = true;
-            } else if (ui.pressedId(idR) && ui.moved()) {
-                ui.takeOwner(idR); beginEdit();
-                sel->fxEnd = std::max(frameAt(ui.px()), sel->fxStart + 1); changed = true;
-            } else if (ui.pressedId(idM) && ui.moved()) {
-                ui.takeOwner(idM); beginEdit();
-                acc += ui.dragDx() / std::max(0.1f, pxPer);
-                int d = (int)std::lround(acc);
-                if (d != 0) { acc -= d; sel->fxStart += d; sel->fxEnd += d; if (sel->fxStart < 0) { sel->fxEnd -= sel->fxStart; sel->fxStart = 0; } changed = true; }
+        } else {
+            Col base = r.kind == 2 ? Col(0.3f, 0.9f, 1.f, 1.f) : (r.kind == 1 ? Col(0.55f, 0.6f, 0.7f, 0.9f) : theme::keyCol);
+            for (int f : r.fr) {
+                bool on = f == cf;
+                bool dragging = tlDrag_.state == 1 && tlDrag_.kind == r.kind && tlDrag_.node == r.node && tlDrag_.frame == f;
+                diamond(fxp((float)f), cy, on || dragging ? theme::text : base, on || dragging ? ks * 1.25f : ks);
             }
         }
-        if (changed) { (void)id; scene.resetEffects(); scene.simulateTo(curFrame()); }
     }
+
+    // ---- касания таблицы ----
+    {
+        if (ui.pressedNow()) tlDrag_ = TlDrag();
+        auto rowAt = [&](float yy) { return (int)std::floor((yy - ry0) / rowH); };
+        auto keyNear = [&](int ri, float xx, int& frame) {
+            if (ri < 0 || ri >= (int)rows.size()) return false;
+            float best = 14 * S;
+            bool ok = false;
+            for (int f : rows[ri].fr) {
+                float d = std::fabs(fxp((float)f) - xx);
+                if (d <= best) { best = d; frame = f; ok = true; }
+            }
+            return ok;
+        };
+        // подписи: раскрытие и выбор кости
+        Rect labZone(rowsView.x, rowsView.y, labW, rowsView.h);
+        uint32_t labZ = ui.zone(labZone);
+        if (ui.tapOn(labZ, labZone)) {
+            int ri = rowAt(ui.py());
+            if (ri >= 0 && ri < (int)rows.size()) {
+                const TLRow& r = rows[ri];
+                if (r.kind == 1) tlBonesOpen_ = !tlBonesOpen_;
+                else if (r.kind == 0) { if (isModel) tlBodyOpen_ = !tlBodyOpen_; tlTarget_ = 0; }
+                else if (r.kind == 2) { selBone_ = r.node; tlTarget_ = 2; }
+            }
+        }
+        bool bar = haveBar && sel;
+        uint32_t idM = 0, idL = 0, idR = 0;
+        if (bar) { idM = ui.zone(barR.inset(0, -3 * S)); idL = ui.zone(handleL); idR = ui.zone(handleR); }
+        bool onBar = bar && (ui.pressedId(idM) || ui.pressedId(idL) || ui.pressedId(idR));
+        if (!ui.blocked && ui.pointerDown() && ui.pressedId(rowsZ) && !onBar) {
+            if (ui.moved() && ui.axis() == 1 && tlDrag_.state == 0) {
+                int ri = rowAt(ui.downY()), kf = 0;
+                if (keyNear(ri, ui.downX(), kf) && (rows[ri].kind == 0 || rows[ri].kind == 2)) {
+                    tlDrag_.state = 1; tlDrag_.kind = rows[ri].kind; tlDrag_.node = rows[ri].node; tlDrag_.frame = kf;
+                    tlDrag_.grab = kf - frameAt(ui.downX());
+                    if (rows[ri].kind == 2) { selBone_ = rows[ri].node; tlTarget_ = 2; } else tlTarget_ = 0;
+                } else tlDrag_.state = 2;
+                ui.takeOwner(rowsZ);
+            }
+            if (ui.owner() == rowsZ) {
+                if (tlDrag_.state == 1) {
+                    int to = frameAt(ui.px()) + tlDrag_.grab;
+                    if (to != tlDrag_.frame) {
+                        beginEdit();
+                        if (tlMoveKey(tlDrag_.kind, tlDrag_.node, tlDrag_.frame, to)) tlDrag_.frame = std::max(a, std::min(b, to));
+                    }
+                } else if (tlDrag_.state == 2) {
+                    int f = frameAt(ui.px());
+                    if (f != cf) { playing_ = false; gotoFrame(f); }
+                }
+            }
+        }
+        if (ui.tapOn(rowsZ, rowsView) && !onBar) {
+            int ri = rowAt(ui.py()), kf = 0;
+            bool hit = keyNear(ri, ui.px(), kf);
+            if (ri >= 0 && ri < (int)rows.size()) {
+                if (rows[ri].kind == 2) { selBone_ = rows[ri].node; tlTarget_ = 2; }
+                else if (rows[ri].kind == 0) tlTarget_ = 0;
+            }
+            playing_ = false;
+            gotoFrame(hit ? kf : frameAt(ui.px()));
+        }
+        if (!ui.pointerDown()) editStarted_ = false;
+        // полоса эффекта: тянуть за края - длительность, за середину - сдвиг по времени
+        if (bar) {
+            static float acc = 0;
+            if (ui.pressedNow()) acc = 0;
+            bool changed = false;
+            if (!ui.blocked && ui.pointerDown()) {
+                if (ui.pressedId(idL) && ui.moved()) {
+                    ui.takeOwner(idL); beginEdit();
+                    sel->fxStart = std::min(frameAt(ui.px()), sel->fxEnd - 1); changed = true;
+                } else if (ui.pressedId(idR) && ui.moved()) {
+                    ui.takeOwner(idR); beginEdit();
+                    sel->fxEnd = std::max(frameAt(ui.px()), sel->fxStart + 1); changed = true;
+                } else if (ui.pressedId(idM) && ui.moved()) {
+                    ui.takeOwner(idM); beginEdit();
+                    acc += ui.dragDx() / std::max(0.1f, pxPer);
+                    int d = (int)std::lround(acc);
+                    if (d != 0) { acc -= d; sel->fxStart += d; sel->fxEnd += d; if (sel->fxStart < 0) { sel->fxEnd -= sel->fxStart; sel->fxStart = 0; } changed = true; }
+                }
+            }
+            if (changed) { scene.resetEffects(); scene.simulateTo(curFrame()); }
+        }
+    }
+    ui.endScroll();
+
+    // линия текущего кадра поверх всего
+    float px = fxp((float)cf);
+    g.rect(Rect(px - 1 * S, track.y + 1 * S, 2 * S, rowsView.b() - track.y - 2 * S), theme::accent2.alpha(0.9f), 0);
+    g.circle(px, track.y + 5 * S, 5 * S, theme::accent2);
 }
 
 // ============================================================ нижняя панель инструментов
@@ -742,10 +954,25 @@ void App::panelObject(const Rect& r) {
 
         if (o->type == ObjType::Model) {
             sectionLabel("Материал");
+            Rect tg = row(38);
+            bool gl = o->glass;
+            if (ui.toggle(tg, "Стекло (прозрачный материал)", gl)) {
+                beginEdit(); o->glass = gl;
+                if (gl) { o->matOverride = true; o->castShadow = false; o->roughness = std::min(o->roughness, 0.05f); }
+                else o->castShadow = true;
+            }
+            if (o->glass) {
+                propF(*o, "Оттенок: красный", [](Object& x) -> float& { return x.color[0]; }, 0, 1, "%.2f", 0);
+                propF(*o, "Оттенок: зелёный", [](Object& x) -> float& { return x.color[1]; }, 0, 1, "%.2f", 0);
+                propF(*o, "Оттенок: синий", [](Object& x) -> float& { return x.color[2]; }, 0, 1, "%.2f", 0);
+                propF(*o, "Прозрачность (больше — мутнее)", [](Object& x) -> float& { return x.glassAlpha; }, 0.f, 0.8f, "%.2f", 0);
+                Rect hint = row(44);
+                ui.label(hint, "Чтобы разбить: добавьте «Разбить стекло (эффект)» и поставьте на нужный кадр. Стекло исчезнет, осколки разлетятся и упадут на пол.", 11, theme::textDim, 0);
+            }
             Rect t1 = row(38);
             bool mo = o->matOverride;
-            if (ui.toggle(t1, "Свой материал (вместо модели)", mo)) { beginEdit(); o->matOverride = mo; }
-            if (o->matOverride) {
+            if (!o->glass && ui.toggle(t1, "Свой материал (вместо модели)", mo)) { beginEdit(); o->matOverride = mo; }
+            if (o->matOverride && !o->glass) {
                 propF(*o, "Красный", [](Object& x) -> float& { return x.color[0]; }, 0, 1, "%.2f", 0);
                 propF(*o, "Зелёный", [](Object& x) -> float& { return x.color[1]; }, 0, 1, "%.2f", 0);
                 propF(*o, "Синий", [](Object& x) -> float& { return x.color[2]; }, 0, 1, "%.2f", 0);
@@ -759,13 +986,20 @@ void App::panelObject(const Rect& r) {
         } else if (o->type == ObjType::Light) {
             sectionLabel("Свет");
             Rect seg = row(38);
-            int k = ui.segmented(seg, {"Солнце", "Точечный"}, o->light == LightKind::Sun ? 0 : 1);
-            if (k >= 0) { beginEdit(); o->light = k == 0 ? LightKind::Sun : LightKind::Point; }
+            int k = ui.segmented(seg, {"Солнце", "Точечный", "Фонарик"}, o->light == LightKind::Sun ? 0 : (o->light == LightKind::Spot ? 2 : 1));
+            if (k >= 0) { beginEdit(); o->light = k == 0 ? LightKind::Sun : (k == 2 ? LightKind::Spot : LightKind::Point); }
             propF(*o, "Красный", [](Object& x) -> float& { return x.lcolor[0]; }, 0, 1, "%.2f", 0);
             propF(*o, "Зелёный", [](Object& x) -> float& { return x.lcolor[1]; }, 0, 1, "%.2f", 0);
             propF(*o, "Синий", [](Object& x) -> float& { return x.lcolor[2]; }, 0, 1, "%.2f", 0);
             propF(*o, "Сила", [](Object& x) -> float& { return x.energy; }, 0, o->light == LightKind::Sun ? 15.f : 200.f, "%.1f", 0);
-            if (o->light == LightKind::Point) propF(*o, "Радиус действия", [](Object& x) -> float& { return x.lradius; }, 0.5f, 40.f, "%.1f", 0);
+            if (o->light != LightKind::Sun) propF(*o, "Радиус действия", [](Object& x) -> float& { return x.lradius; }, 0.5f, 40.f, "%.1f", 0);
+            if (o->light == LightKind::Spot) {
+                propF(*o, "Угол луча, °", [](Object& x) -> float& { return x.spotAngle; }, 5.f, 80.f, "%.0f", 0);
+                propF(*o, "Мягкость края", [](Object& x) -> float& { return x.spotSoft; }, 0.f, 0.95f, "%.2f", 0);
+                propF(*o, "Видимый луч", [](Object& x) -> float& { return x.beam; }, 0.f, 1.f, "%.2f", 0);
+                Rect hint = row(44);
+                ui.label(hint, "Фонарик светит по направлению конуса на значке. Вращайте его гизмо, чтобы навести луч. Можно прицепить к руке или голове.", 11, theme::textDim, 0);
+            }
         } else if (o->type == ObjType::Camera) {
             sectionLabel("Камера");
             propF(*o, "Угол обзора", [](Object& x) -> float& { return x.fovDeg; }, 10.f, 120.f, "%.0f°", 0);
@@ -795,46 +1029,23 @@ void App::panelObject(const Rect& r) {
             ui.g.icon(Icon::Link, Rect(l.x, l.y, 22 * S, 22 * S), theme::accent2);
             ui.g.text(ui.g.fit(desc, 13 * S, l.w - 30 * S), l.x + 28 * S, l.cy() + 5 * S, 13 * S, theme::text);
             Rect b = row(42);
-            if (ui.button(b, "Отцепить на кадре " + std::to_string(cf), 2, 14)) {
+            if (ui.button(cell(b, 0, 2), "Отцепить (кадр " + std::to_string(cf) + ")", 2, 13)) {
                 scene.pushUndo();
                 if (scene.detach(id, cf)) toast("Отцеплено: предмет останется на месте и продолжит двигаться сам");
                 scene.resetEffects(); scene.simulateTo(cf);
             }
+            if (ui.button(cell(b, 1, 2), "Сменить прицеп…", 0, 13)) attachFlow(id);
+            Rect b2 = row(38);
+            if (ui.button(b2, "Поставить в точку кости (сброс смещения)", 0, 12.5f) && p) {
+                scene.pushUndo();
+                int nd = pk->node, pid = pk->parent;
+                scene.attach(id, pid, nd, cf, true);
+                scene.resetEffects(); scene.simulateTo(cf);
+                toast("Предмет перенесён в точку кости");
+            }
         } else {
             Rect b = row(42);
-            if (ui.button(b, "Прицепить к…", 1, 14)) {
-                std::vector<std::string> names;
-                std::vector<int> ids;
-                std::vector<Icon> icons;
-                for (auto& op : scene.objects) {
-                    if (op->id == id) continue;
-                    names.push_back(op->name);
-                    ids.push_back(op->id);
-                    icons.push_back(typeIcon(*op));
-                }
-                if (ids.empty()) toast("Нет объектов, к которым можно прицепить");
-                else pickList("Прицепить к объекту", names, [this, id, ids](int k) {
-                    int pid = ids[k];
-                    Object* p = scene.find(pid);
-                    std::vector<int> nodes;
-                    std::vector<std::string> nn{"Объект целиком"};
-                    if (p && p->type == ObjType::Model && p->model >= 0 && p->model < (int)scene.models.size() && scene.models[p->model].model) {
-                        const Model& m = *scene.models[p->model].model;
-                        nodes = scene.boneNodes(*p);  // только настоящие суставы
-                        for (int j : nodes) nn.push_back("кость: " + (m.nodes[j].name.empty() ? std::to_string(j) : m.nodes[j].name));
-                    }
-                    auto doAttach = [this, id, pid](int node) {
-                        scene.pushUndo();
-                        int f = curFrame();
-                        if (scene.attach(id, pid, node, f)) {
-                            toast("Прицеплено на кадре " + std::to_string(f) + ". Дальше выберите кадр и нажмите «Отцепить»");
-                        } else toast("Нельзя прицепить: получится замкнутая цепочка");
-                        scene.resetEffects(); scene.simulateTo(f);
-                    };
-                    if (nodes.empty()) doAttach(-1);
-                    else pickList("Куда прицепить", nn, [doAttach, nodes](int q) { doAttach(q == 0 ? -1 : nodes[q - 1]); });
-                }, icons);
-            }
+            if (ui.button(b, "Прицепить к…", 1, 14)) attachFlow(id);
         }
         if (!o->parents.empty()) {
             Rect l = row(20);
@@ -858,6 +1069,45 @@ void App::panelObject(const Rect& r) {
     }
     contentObj_ = form_.y - top + 24 * S;
     ui.endScroll();
+}
+
+// Прицепление: выбрать объект, затем кость, затем «оставить на месте» или «поставить в точку кости».
+void App::attachFlow(int id) {
+    std::vector<std::string> names;
+    std::vector<int> ids;
+    std::vector<Icon> icons;
+    for (auto& op : scene.objects) {
+        if (op->id == id) continue;
+        names.push_back(op->name);
+        ids.push_back(op->id);
+        icons.push_back(typeIcon(*op));
+    }
+    if (ids.empty()) { toast("Нет объектов, к которым можно прицепить"); return; }
+    pickList("Прицепить к объекту", names, [this, id, ids](int k) {
+        int pid = ids[k];
+        Object* p = scene.find(pid);
+        std::vector<int> nodes;
+        std::vector<std::string> nn{"Объект целиком"};
+        if (p && p->type == ObjType::Model && p->model >= 0 && p->model < (int)scene.models.size() && scene.models[p->model].model) {
+            const Model& m = *scene.models[p->model].model;
+            nodes = scene.boneNodes(*p);  // только настоящие суставы
+            for (int j : nodes) nn.push_back("кость: " + (m.nodes[j].name.empty() ? std::to_string(j) : m.nodes[j].name));
+        }
+        auto doAttach = [this, id, pid](int node, bool snap) {
+            scene.pushUndo();
+            int f = curFrame();
+            if (scene.attach(id, pid, node, f, snap)) {
+                toast("Прицеплено на кадре " + std::to_string(f) + ". Чтобы отцепить, выберите кадр и нажмите «Отцепить»");
+            } else toast("Нельзя прицепить: получится замкнутая цепочка");
+            scene.resetEffects(); scene.simulateTo(f);
+        };
+        auto askSnap = [this, doAttach](int node) {
+            pickList("Как прицепить", {"Оставить на месте (как сейчас)", "Поставить в точку кости / объекта"},
+                     [doAttach, node](int q) { doAttach(node, q == 1); }, {Icon::Link, Icon::Bone});
+        };
+        if (nodes.empty()) askSnap(-1);
+        else pickList("Куда прицепить", nn, [askSnap, nodes](int q) { askSnap(q == 0 ? -1 : nodes[q - 1]); });
+    }, icons);
 }
 
 // ============================================================ панель «Анимация»
@@ -1055,6 +1305,33 @@ void App::panelRender(const Rect& r) {
         int bv[3] = {8, 16, 30}, curb = rs.videoBitrateMbps <= 8 ? 0 : (rs.videoBitrateMbps <= 16 ? 1 : 2);
         int k3 = ui.segmented(q3, {"8 Мбит/с", "16 Мбит/с", "30 Мбит/с"}, curb);
         if (k3 >= 0) { beginEdit(); rs.videoBitrateMbps = bv[k3]; editStarted_ = false; }
+    }
+    sectionLabel("Небо и время суток");
+    {
+        Rect t = row(38);
+        bool v = rs.todOn;
+        if (ui.toggle(t, "Небо и свет по времени суток", v)) { beginEdit(); rs.todOn = v; editStarted_ = false; }
+        if (rs.todOn) {
+            Rect pr = row(42);
+            static const char* nm[4] = {"Утро", "День", "Закат", "Ночь"};
+            static const float hrs[4] = {7.f, 12.f, 17.7f, 23.5f};
+            for (int i = 0; i < 4; i++) {
+                bool on = std::fabs(rs.tod - hrs[i]) < 0.75f;
+                if (ui.button(cell(pr, i, 4, 4), nm[i], on ? 1 : 0, 12.5f)) { scene.pushUndo(); rs.tod = hrs[i]; autoSaveDirty_ = true; }
+            }
+            float hh = rs.tod;
+            Rect sr = row(38);
+            char lab[48];
+            int hi = (int)hh % 24, mi = (int)((hh - std::floor(hh)) * 60.f);
+            std::snprintf(lab, sizeof lab, "Время: %02d:%02d", hi, mi);
+            auto ap = [this](float nv) { beginEdit(); scene.render.tod = clampf(nv, 0.f, 24.f); };
+            if (slide(sr, lab, hh, 0.f, 24.f, "", 24.f / std::max(1.f, sr.w / S), ap)) ap(hh);
+            Rect hint = row(56);
+            ui.label(hint, "Ночью появляются луна и звёзды, на закате небо оранжевое. Направление солнца берётся из объекта «Солнце» (по горизонтали), высота — по времени. Для ночных сцен добавьте «Фонарик».", 11, theme::textDim, 0);
+        } else {
+            Rect hint = row(40);
+            ui.label(hint, "Выключено: цвета неба задаются вручную. Включите, чтобы выбрать утро, день, закат или ночь.", 11, theme::textDim, 0);
+        }
     }
     sectionLabel("Свет и тени");
     sl("Яркость неба", rs.skyBrightness, 0.f, 3.f, "%.2f");

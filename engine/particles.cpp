@@ -184,6 +184,59 @@ void main(){
         glVertexAttribDivisor(1, 1);
         glBindVertexArray(0);
     }
+
+    static const char* gvs = R"(#version 300 es
+layout(location=0) in vec3 a_p; layout(location=1) in vec3 a_n; layout(location=2) in vec3 a_b; layout(location=3) in float a_s;
+uniform mat4 u_vp;
+out vec3 v_w; out vec3 v_n; out vec3 v_b; out float v_s;
+void main(){ v_w = a_p; v_n = a_n; v_b = a_b; v_s = a_s; gl_Position = u_vp * vec4(a_p, 1.0); }
+)";
+    static const char* gfs = R"(#version 300 es
+precision highp float;
+in vec3 v_w; in vec3 v_n; in vec3 v_b; in float v_s;
+uniform vec3 u_cam, u_sun; uniform float u_light, u_outScale;
+out vec4 o;
+void main(){
+  vec3 N = normalize(v_n); if (!gl_FrontFacing) N = -N;
+  vec3 V = normalize(u_cam - v_w);
+  float nv = abs(dot(N, V));
+  float F = 0.06 + 0.94 * pow(1.0 - nv, 4.0);
+  vec3 H = normalize(V + normalize(u_sun));
+  float nh = max(dot(N, H), 0.0);
+  float sp = pow(nh, 90.0) * 3.0 + pow(nh, 14.0) * 0.22;
+  float eb = min(v_b.x, min(v_b.y, v_b.z));
+  float edge = 1.0 - smoothstep(0.0, 0.09, eb);
+  vec3 base = vec3(0.62, 0.84, 0.9) * u_light * (0.18 + 0.28 * v_s);
+  vec3 sky = vec3(0.7, 0.85, 1.0) * u_light * 0.7;
+  vec3 c = base + sky * F + vec3(1.0) * sp * (0.5 + 0.5 * v_s) + vec3(0.8, 0.95, 1.0) * edge * 0.55 * u_light;
+  float a = clamp(0.2 + F * 0.65 + sp * 0.25 + edge * 0.35, 0.0, 0.92);
+  o = vec4(c * a * u_outScale, a);
+}
+)";
+    GLuint gv = compileShader(GL_VERTEX_SHADER, gvs), gf = compileShader(GL_FRAGMENT_SHADER, gfs);
+    if (gv && gf) {
+        shProg_ = glCreateProgram();
+        glAttachShader(shProg_, gv); glAttachShader(shProg_, gf);
+        glLinkProgram(shProg_);
+        GLint ok3 = 0;
+        glGetProgramiv(shProg_, GL_LINK_STATUS, &ok3);
+        if (!ok3) { glDeleteProgram(shProg_); shProg_ = 0; }
+    }
+    if (gv) glDeleteShader(gv);
+    if (gf) glDeleteShader(gf);
+    if (shProg_) {
+        shVP_ = glGetUniformLocation(shProg_, "u_vp"); shCam_ = glGetUniformLocation(shProg_, "u_cam"); shSun_ = glGetUniformLocation(shProg_, "u_sun");
+        shLight_ = glGetUniformLocation(shProg_, "u_light"); shOut_ = glGetUniformLocation(shProg_, "u_outScale");
+        glGenVertexArrays(1, &shVao_);
+        glBindVertexArray(shVao_);
+        glGenBuffers(1, &shBuf_);
+        glBindBuffer(GL_ARRAY_BUFFER, shBuf_);
+        glEnableVertexAttribArray(0); glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 40, nullptr);
+        glEnableVertexAttribArray(1); glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 40, (const void*)12);
+        glEnableVertexAttribArray(2); glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 40, (const void*)24);
+        glEnableVertexAttribArray(3); glVertexAttribPointer(3, 1, GL_FLOAT, GL_FALSE, 40, (const void*)36);
+        glBindVertexArray(0);
+    }
     return true;
 }
 
@@ -195,12 +248,16 @@ void Particles::release() {
     if (splatProg_) glDeleteProgram(splatProg_);
     if (splatVao_) glDeleteVertexArrays(1, &splatVao_);
     if (splatBuf_) glDeleteBuffers(1, &splatBuf_);
+    if (shProg_) glDeleteProgram(shProg_);
+    if (shVao_) glDeleteVertexArrays(1, &shVao_);
+    if (shBuf_) glDeleteBuffers(1, &shBuf_);
+    shProg_ = shVao_ = shBuf_ = 0;
     prog_ = vao_ = quad_ = ibuf_ = 0;
     splatProg_ = splatVao_ = splatBuf_ = 0;
     ibufCap_ = 0;
 }
 
-void Particles::clear() { ps_.clear(); splats_.clear(); emitters_.clear(); lights_.clear(); steady_.clear(); time_ = 0; }
+void Particles::clear() { ps_.clear(); shards_.clear(); splats_.clear(); emitters_.clear(); lights_.clear(); steady_.clear(); time_ = 0; }
 
 void Particles::emitFire(Vec3 pos, float s, float dt, float* acc) {
     acc[0] += dt * 70.f * s;
@@ -469,8 +526,139 @@ void Particles::trail(Vec3 pos, Vec3 vel) {
     if (rnd() < 0.35f) smokePuff(pos, 0.12f, 0.8f);
 }
 
+
+// ---------------------------------------------------------------- стекло
+static Quat quatBasis(Vec3 u, Vec3 v, Vec3 n) {
+    Mat4 m;
+    m.m[0] = u.x; m.m[1] = u.y; m.m[2] = u.z;
+    m.m[4] = v.x; m.m[5] = v.y; m.m[6] = v.z;
+    m.m[8] = n.x; m.m[9] = n.y; m.m[10] = n.z;
+    Vec3 t, sc;
+    Quat q;
+    decompose(m, t, q, sc);
+    return normalize(q);
+}
+
+void Particles::glassBreak(Vec3 c, Vec3 u, Vec3 v, Vec3 n, float hu, float hv, Vec3 impact, Vec3 push, float power, float shardScale) {
+    u = normalize(u); v = normalize(v); n = normalize(n);
+    float area = std::max(1e-3f, 4.f * hu * hv);
+    float cs = std::max(0.07f, 0.14f * std::max(0.4f, shardScale));
+    cs = std::max(cs, std::sqrt(area / 90.f));
+    int nu = std::max(2, (int)std::ceil(2.f * hu / cs)), nv = std::max(2, (int)std::ceil(2.f * hv / cs));
+    std::vector<Vec3> grid((size_t)(nu + 1) * (nv + 1));
+    auto G = [&](int i, int j) -> Vec3& { return grid[(size_t)j * (nu + 1) + i]; };
+    float du = 2.f * hu / nu, dv = 2.f * hv / nv;
+    for (int j = 0; j <= nv; j++)
+        for (int i = 0; i <= nu; i++) {
+            float a = -hu + du * i, b = -hv + dv * j;
+            if (i > 0 && i < nu) a += rr(-0.35f, 0.35f) * du;
+            if (j > 0 && j < nv) b += rr(-0.35f, 0.35f) * dv;
+            G(i, j) = c + u * a + v * b;
+        }
+    Quat q0 = quatBasis(u, v, n);
+    Vec3 pd = length(push) > 1e-4f ? normalize(push) : n * -1.f;
+    float pw = std::max(0.1f, power);
+    for (int j = 0; j < nv; j++)
+        for (int i = 0; i < nu; i++) {
+            Vec3 p00 = G(i, j), p10 = G(i + 1, j), p11 = G(i + 1, j + 1), p01 = G(i, j + 1);
+            bool flip = rnd() < 0.5f;
+            Vec3 tri[2][3] = {{p00, p10, flip ? p11 : p01}, {flip ? p00 : p10, p11, p01}};
+            if (!flip) { tri[0][0] = p00; tri[0][1] = p10; tri[0][2] = p01; tri[1][0] = p10; tri[1][1] = p11; tri[1][2] = p01; }
+            for (int t = 0; t < 2; t++) {
+                if (shards_.size() >= 600) return;
+                Shard s;
+                Vec3 cen = (tri[t][0] + tri[t][1] + tri[t][2]) * (1.f / 3.f);
+                // локальные вершины в системе (u, v, n)
+                for (int k = 0; k < 3; k++) {
+                    Vec3 d = tri[t][k] - cen;
+                    s.v[k] = Vec3(dot(d, u), dot(d, v), dot(d, n));
+                    s.v[k] = s.v[k] * 0.97f;
+                }
+                s.pos = cen; s.q = q0; s.seed = rnd();
+                Vec3 rel = cen - impact;
+                rel = rel - n * dot(rel, n);
+                float d = length(rel);
+                Vec3 dirIn = d > 1e-3f ? rel * (1.f / d) : rndDir();
+                float sIn = std::min(6.f, pw * 1.4f / (0.3f + d));
+                float sPush = pw * 2.4f / (1.f + d * 3.5f);
+                s.vel = dirIn * (sIn * 0.5f) + pd * sPush + Vec3(rr(-0.3f, 0.3f), rr(-0.1f, 0.6f), rr(-0.3f, 0.3f));
+                Vec3 ax = rndDir();
+                s.spin = ax * (rr(2.f, 9.f) / (0.6f + d * 0.6f)) * std::min(1.f, 0.4f + pw * 0.3f);
+                shards_.push_back(s);
+            }
+        }
+}
+
+void Particles::updateShards(float dt, float groundY) {
+    for (Shard& s : shards_) {
+        if (s.rest) continue;
+        s.vel.y -= 9.81f * dt;
+        s.vel = s.vel * (1.f / (1.f + 0.08f * dt));
+        s.pos += s.vel * dt;
+        float sp = length(s.spin);
+        if (sp > 1e-4f) s.q = normalize(quatAxisAngle(s.spin * (1.f / sp), sp * dt) * s.q);
+        Mat4 R = fromQuat(s.q);
+        float minY = 1e9f;
+        for (int k = 0; k < 3; k++) minY = std::min(minY, s.pos.y + transformDir(R, s.v[k]).y);
+        if (minY < groundY + 0.002f) {
+            s.pos.y += groundY + 0.002f - minY;
+            if (s.vel.y < 0) s.vel.y = -s.vel.y * 0.22f;
+            if (std::fabs(s.vel.y) < 0.7f) s.vel.y = 0;
+            s.vel.x *= 0.65f; s.vel.z *= 0.65f;
+            s.spin = s.spin * 0.55f;
+            // ложится плашмя
+            Vec3 n0 = transformDir(R, Vec3(0, 0, 1));
+            Vec3 target = n0.y >= 0 ? Vec3(0, 1, 0) : Vec3(0, -1, 0);
+            Vec3 ax = cross(n0, target);
+            float al = length(ax);
+            if (al > 1e-4f) {
+                float ang = std::asin(std::min(1.f, al));
+                Quat dq = quatAxisAngle(ax * (1.f / al), ang * 0.35f);
+                s.q = normalize(dq * s.q);
+            }
+            if (length(s.vel) < 0.12f && length(s.spin) < 0.4f && al < 0.05f) { s.rest = true; s.vel = Vec3(); s.spin = Vec3(); }
+        }
+    }
+}
+
+void Particles::drawShards(const Mat4& vp, Vec3 cam) {
+    if (!shProg_ || shards_.empty()) return;
+    std::vector<float> buf;
+    buf.reserve(shards_.size() * 30);
+    for (const Shard& s : shards_) {
+        Mat4 R = fromQuat(s.q);
+        Vec3 n = transformDir(R, Vec3(0, 0, 1));
+        static const float bc[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+        for (int k = 0; k < 3; k++) {
+            Vec3 w = s.pos + transformDir(R, s.v[k]);
+            float vtx[10] = {w.x, w.y, w.z, n.x, n.y, n.z, bc[k][0], bc[k][1], bc[k][2], s.seed};
+            buf.insert(buf.end(), vtx, vtx + 10);
+        }
+    }
+    glUseProgram(shProg_);
+    glUniformMatrix4fv(shVP_, 1, GL_FALSE, vp.m);
+    glUniform3f(shCam_, cam.x, cam.y, cam.z);
+    Vec3 sd = normalize(sun_);
+    glUniform3f(shSun_, sd.x, sd.y, sd.z);
+    glUniform1f(shLight_, lightScale_);
+    glUniform1f(shOut_, outScale_);
+    glBindVertexArray(shVao_);
+    glBindBuffer(GL_ARRAY_BUFFER, shBuf_);
+    glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)(buf.size() * sizeof(float)), buf.data(), GL_STREAM_DRAW);
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
+    glDisable(GL_CULL_FACE);
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    glDrawArrays(GL_TRIANGLES, 0, (GLsizei)(shards_.size() * 3));
+    glDepthMask(GL_TRUE);
+    glDisable(GL_BLEND);
+    glBindVertexArray(0);
+}
+
 void Particles::update(float dt, float groundY) {
     time_ += dt;
+    updateShards(dt, groundY);
     for (auto& l : lights_) l.life += dt;
     lights_.erase(std::remove_if(lights_.begin(), lights_.end(), [](const PointLight& l) { return l.life >= l.maxLife; }), lights_.end());
 
@@ -552,6 +740,7 @@ void Particles::drawSplats(const Mat4& vp) {
 void Particles::render(const Mat4& vp, Vec3 camRight, Vec3 camUp, Vec3 camPos) {
     if (!prog_) return;
     drawSplats(vp);
+    drawShards(vp, camPos);
     if (ps_.empty()) return;
     std::vector<const Particle*> alpha, add;
     for (const Particle& p : ps_) ((p.type == P_SMOKE || p.type == P_DUST || p.type == P_BLOOD) ? alpha : add).push_back(&p);

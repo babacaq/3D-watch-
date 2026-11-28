@@ -74,13 +74,20 @@ private:
         GLint metal = -1, rough = -1, nScale = -1, emis = -1, tint = -1, useVC = -1;
         GLint cam = -1, L = -1, sunCol = -1, lightVP = -1, texel = -1, shadowSoft = -1, shadowOn = -1, pass = -1;
         GLint shadowRaw = -1, uvPerM = -1, shRange = -1, contact = -1;
+        GLint sp = -1, spIn = -1, glass = -1;
         GLint skyTop = -1, skyHor = -1, skyGnd = -1, skyBright = -1, pl = -1, plc = -1, nPl = -1, outScale = -1, isFloor = -1, fogCol = -1;
     };
     struct FrameLights {
         bool hasSun = false;
+        float sunBase = 0.f;
         Vec3 sunDir{0.4f, 0.8f, 0.4f}, sunCol{0, 0, 0};
         float pl[32] = {0}, plc[24] = {0};
+        float sp[32] = {0}, spIn[8] = {0};  // фонарики: направление и cos внешнего угла (-2 = точечный), cos внутреннего
         int n = 0;
+        struct Beam { Vec3 pos, dir, col; float len, ang, k; };
+        std::vector<Beam> beams;
+        float skyTop[3] = {0.22f, 0.42f, 0.85f}, skyHor[3] = {0.78f, 0.84f, 0.92f}, skyGnd[3] = {0.2f, 0.19f, 0.18f};
+        float skyBright = 0.6f, stars = 0.f, moon = 0.f;
     };
 
     bool buildPrograms();
@@ -91,12 +98,14 @@ private:
     void freeSet(TargetSet& s);
     bool testFloatTargets();
 
+    static void applyTimeOfDay(const RenderSettings& r, FrameLights& fl, bool sunObjExists);
     void gatherLights(Scene& sc, FrameLights& fl);
     void shadowPass(Scene& sc, const FrameLights& fl, int pass, Mat4& lightVP, float softness);
     void scenePass(Scene& sc, TargetSet& s, const View& v, const Mat4& lightVP, const FrameLights& fl, int pass, bool realtime, const Overlay* ov);
     void drawModels(Scene& sc, int pass, const Locs& L, const Vec3& eye);  // 0 тень, 1 непрозрачное, 2 прозрачное
     void drawFloor(Scene& sc, const Locs& L);
     void drawSky(Scene& sc, const View& v, const FrameLights& fl);
+    void drawBeams(const FrameLights& fl, const View& v);
     void buildOverlay(Scene& sc, const View& v, const Overlay& ov);
     void ssaoPass(TargetSet& s, const View& v, int pass, float strength);
     void bloomPass(TargetSet& s, GLuint srcTex, float threshold);
@@ -106,7 +115,7 @@ private:
 
     bool ready_ = false, hdrFloat_ = true;
     float outScale_ = 1.f, inScale_ = 1.f;
-    GLuint pbr_ = 0, depthP_ = 0, sky_ = 0, ssao_ = 0, blur_ = 0, down_ = 0, up_ = 0, tone_ = 0, fxaa_ = 0, acc_ = 0;
+    GLuint pbr_ = 0, depthP_ = 0, beam_ = 0, sky_ = 0, ssao_ = 0, blur_ = 0, down_ = 0, up_ = 0, tone_ = 0, fxaa_ = 0, acc_ = 0;
     Locs L_, dL_;
     GLuint emptyVao_ = 0;
     GLuint shadowTex_ = 0, shadowFbo_ = 0, rawSampler_ = 0;

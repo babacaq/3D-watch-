@@ -18,6 +18,13 @@ struct Particle {
     int type = P_FIRE;
 };
 
+struct Shard {
+    Vec3 pos, vel, spin, v[3];
+    Quat q;
+    float seed = 0;
+    bool rest = false;
+};
+
 struct PointLight {
     Vec3 pos, color;
     float radius = 5, life = 0, maxLife = 0.1f, intensity = 5;
@@ -55,6 +62,10 @@ public:
     void bloodBurst(Vec3 pos, Vec3 dir, float scale, float power);
     void bloodFlow(Vec3 pos, Vec3 dir, float scale, float power, float dt, float* acc);
     int splatCount() const { return (int)splats_.size(); }
+    // стекло: осколки по плоскости (центр c, оси u, v, нормаль n, полуразмеры hu, hv); удар в точке impact толкает вдоль push
+    void glassBreak(Vec3 c, Vec3 u, Vec3 v, Vec3 n, float hu, float hv, Vec3 impact, Vec3 push, float power, float shardScale);
+    int shardCount() const { return (int)shards_.size(); }
+    void setSun(Vec3 d) { sun_ = d; }
     void impact(Vec3 pos, Vec3 normal, float speed, bool dust);
     void smokePuff(Vec3 pos, float size, float life);
     void trail(Vec3 pos, Vec3 vel);
@@ -77,6 +88,12 @@ private:
     void addLight(Vec3 pos, Vec3 color, float radius, float life, float intensity);
 
     struct Splat { float x, z, r, seed; };
+    std::vector<Shard> shards_;
+    GLuint shProg_ = 0, shVao_ = 0, shBuf_ = 0;
+    GLint shVP_ = -1, shCam_ = -1, shSun_ = -1, shLight_ = -1, shOut_ = -1;
+    Vec3 sun_{0.4f, 0.8f, 0.4f};
+    void drawShards(const Mat4& vp, Vec3 cam);
+    void updateShards(float dt, float groundY);
     std::vector<Splat> splats_;
     GLuint splatProg_ = 0, splatVao_ = 0, splatBuf_ = 0;
     GLint sVP_ = -1, sLight_ = -1, sOut_ = -1, sY_ = -1;

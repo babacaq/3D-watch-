@@ -341,7 +341,41 @@ void App::panelSimExtras(Object& o) {
     }
 
     // ---------- ткань ----------
-    sectionLabel("Ткань: волосы, плащ (меш без костей)");
+    sectionLabel("Ткань: плащ, юбка, волосы");
+    {
+        // выбор частей: ткань действует только на отмеченные меши, остальное тело остаётся как есть
+        std::vector<int> cand = scene.clothCandidates(o);
+        if (!cand.empty()) {
+            const Model& mm = *scene.models[o.model].model;
+            Rect hl = row(34);
+            ui.label(hl, "Части модели с тканью (отметьте нужные):", 12, theme::textDim, 0);
+            for (int mi : cand) {
+                const MeshData& md = mm.meshes[(size_t)mi];
+                std::string nm = md.name;
+                if (nm.empty()) for (size_t ni = 0; ni < mm.nodes.size(); ni++) for (int q : mm.nodes[ni].meshes) if (q == mi && !mm.nodes[ni].name.empty()) nm = mm.nodes[ni].name;
+                if (nm.empty()) nm = "часть " + std::to_string(mi);
+                nm += md.skin >= 0 ? "  · на скелете" : "  · жёсткая";
+                Rect tr = row(38);
+                bool on = scene.clothMeshOn(o, mi);
+                if (ui.toggle(tr, nm, on)) {
+                    beginEdit();
+                    std::vector<int> sel;
+                    for (int c : cand) {
+                        bool cur = scene.clothMeshOn(o, c);
+                        if (c == mi) cur = !cur;
+                        if (cur) sel.push_back(c);
+                    }
+                    if (sel.empty()) sel.push_back(-1);  // -1: ни одной части
+                    o.cloth.meshes = sel;
+                    refresh();
+                    editStarted_ = false;
+                }
+            }
+            Rect bb = row(38);
+            if (ui.button(cell(bb, 0, 2), "Все части", 0, 12.5f)) { beginEdit(); o.cloth.meshes = cand; refresh(); editStarted_ = false; }
+            if (ui.button(cell(bb, 1, 2), "Сбросить выбор", 0, 12.5f)) { beginEdit(); o.cloth.meshes.clear(); refresh(); editStarted_ = false; }
+        }
+    }
     {
         std::string why;
         if (!scene.clothSupported(o, &why)) {
@@ -387,8 +421,8 @@ void App::panelFx(const Rect& r) {
         ui.label(l, "Выберите эффект в списке «Сцена» или тапом по значку в окне, чтобы настроить его: силу, время, положение.", 12.5f, theme::textDim, 1);
     } else {
         int id = o->id;
-        static const char* names[] = {"Огонь", "Дым", "Вспышка выстрела", "Взрыв", "Искры", "Кровь"};
-        sectionLabel(std::string(names[std::min(5, (int)o->fx)]) + " — " + o->name);
+        static const char* names[] = {"Огонь", "Дым", "Вспышка выстрела", "Взрыв", "Искры", "Кровь", "Разбитое стекло"};
+        sectionLabel(std::string(names[std::min(6, (int)o->fx)]) + " — " + o->name);
         auto resim = [this]() { scene.resetEffects(); scene.simulateTo(curFrame()); };
         if (o->fx == FxKind::Muzzle) {
             Rect seg = row(42);
@@ -406,6 +440,23 @@ void App::panelFx(const Rect& r) {
             if (ui.toggle(t, "Толкает предметы с физикой", v)) { beginEdit(); o->fxPush = v; scene.evaluate((float)frameF_); resim(); editStarted_ = false; }
             Rect hint = row(40);
             ui.label(hint, "Чем больше сила, тем крупнее огонь, выше столб дыма и дальше летят осколки и предметы.", 11, theme::textDim, 0);
+        } else if (o->fx == FxKind::Glass) {
+            Rect tb = row(42);
+            const Object* tg = scene.find(o->fxTarget);
+            std::string tl = tg ? "Стекло: " + tg->name : "Стекло: не выбрано (условная панель)";
+            if (ui.button(tb, tl, 0, 13)) {
+                std::vector<std::string> names2{"Не выбрано (условная панель)"};
+                std::vector<int> ids{-1};
+                for (auto& q : scene.objects) if (q->glass) { names2.push_back(q->name); ids.push_back(q->id); }
+                pickList("Какое стекло разбить", names2, [this, id, ids](int k) {
+                    Object* ob = scene.find(id);
+                    if (!ob || k < 0 || k >= (int)ids.size()) return;
+                    beginEdit(); ob->fxTarget = ids[k]; scene.resetEffects(); scene.simulateTo(curFrame()); editStarted_ = false;
+                });
+            }
+            propSim(*o, "Сила удара", [](Object& x) -> float& { return x.fxPower; }, 0.2f, 4.f, "%.2f", 0);
+            Rect hint = row(60);
+            ui.label(hint, "Точка удара — положение эффекта, направление удара — ось Z (синяя). Чем сильнее удар, тем дальше летят осколки. Размер — крупность осколков: меньше значение — больше мелких.", 11, theme::textDim, 0);
         } else if (o->fx == FxKind::Blood) {
             Rect seg = row(42);
             int k = ui.segmented(seg, {"Брызги", "Течёт"}, o->fxVariant);

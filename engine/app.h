@@ -24,6 +24,9 @@ struct Platform {
     std::function<bool()> videoEnd;
     std::function<void()> videoCancel;
     std::function<void(const std::string&)> toast;
+    std::function<void()> pickExportDir;                  // выбрать папку для экспорта (необязательно)
+    std::function<void()> resetExportDir;                 // вернуть папку по умолчанию
+    std::function<std::string()> exportDirName;           // как называется выбранная папка (пусто: по умолчанию)
 };
 
 enum class Tab { None, Scene, Object, Bones, Physics, Fx, Anim, Render };
@@ -48,6 +51,8 @@ struct Settings {
     bool inertia = true;        // вид «доезжает» после броска
     bool invertY = false;       // инвертировать наклон вида
     bool doubleTapFocus = true; // двойной тап по сцене: показать выбранный объект
+    int wallpaper = 0;          // обои главного экрана и настроек: 0 тема, 1 призмы, 2 звёзды, 3 закат, 4 сетка, 5 однотонный
+    bool boneLines = false;     // линии между костями (по умолчанию только точки)
 };
 
 class App {
@@ -58,6 +63,8 @@ public:
     void saveSettings() const;
     void openSettings() { settingsOpen_ = true; scrollSettings_.off = 0; }
     void closeSettings() { settingsOpen_ = false; }
+    void resetSettings();
+    void drawWallpaper(const Rect& r, int style = -1);
     bool settingsOpen() const { return settingsOpen_; }
     void setTheme(int id) { settings.theme = id; theme::apply(id); saveSettings(); }
     Scene scene;
@@ -143,6 +150,9 @@ private:
     void propSim(Object& o, const std::string& label, std::function<float&(Object&)> ref, float lo, float hi, const char* fmt, float perDp);
     void drawViewportOverlay();
     void drawTimeline();
+    void attachFlow(int id);
+    bool tlMoveKey(int kind, int node, int from, int to);
+    void tlJumpKey(int dir);
     void drawTabs();
     void drawPanel();
     void panelScene(const Rect& r);
@@ -238,6 +248,13 @@ private:
     bool homeDirty_ = true;
     std::string thumbPending_;
     bool hasAutosave_ = false;
+
+    // таймлайн
+    ScrollState scrollTL_;
+    bool tlTall_ = false, tlBodyOpen_ = true, tlBonesOpen_ = false;
+    int tlTarget_ = 0;  // 0 ключи тела, 2 ключи выбранной кости
+    Tab tlPrevTab_ = Tab::None;
+    struct TlDrag { int state = 0, kind = -1, node = -1, frame = 0, grab = 0; } tlDrag_;
 
     // кости
     int selBone_ = -1;

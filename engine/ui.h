@@ -50,7 +50,7 @@ bool gradient();                   // у темы градиентные гла�
 
 enum class Icon {
     Eye, EyeOff, Plus, Trash, Copy, Undo, Redo, Play, Pause, Prev, Next, ToStart, ToEnd, Key, KeyAdd, Move, Rotate, Scale,
-    Camera, Sun, Bulb, Cube, Flame, Menu, ChevDown, ChevUp, Close, Link, Unlink, Film, Image, Check, Bone, Snap, Lock, Folder, Save, Gear, Smoke, Bolt, Sparks, Model, Ball, Drop, Home, Back, Layers, Dots3, Rig, Palette
+    Camera, Sun, Bulb, Cube, Flame, Menu, ChevDown, ChevUp, Close, Link, Unlink, Film, Image, Check, Bone, Snap, Lock, Folder, Save, Gear, Smoke, Bolt, Sparks, Model, Ball, Drop, Home, Back, Layers, Dots3, Rig, Palette, PrevKey, NextKey, Glass, Moon
 };
 
 class Gfx {
